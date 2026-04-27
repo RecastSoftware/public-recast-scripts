@@ -29,7 +29,7 @@ This script that can automate the process of moving packages through the stages 
 
 This script will assist in syncing devices in an Entra AD group to a matcing Device Collection in Application Workspace. This will need to be modified from its original version if you want to support multiple Entra AD Groups and multiple Device Collections. This is just a starting point. This will require someone to sign in with the right permissions. If you wanted to, you could modify this to support an app registration and secret key so that you can run this as a scheduled task. This will remove any members that have been taken out of that Entra group, and add those that have been added. This will also create the Device Collection if it doesn't already exist to match the displayName of the Entra AD Group.
 
-## Import-ConfigMgrPackages.ps1
+## Import-ConfigMgrPackages.ps1 (soon to be replaced with a new tool)
 
 This script will attempt to import in applications and packages from ConfigMgr into Application Workspace. It will not create "Launch" actions as those don't exist in ConfigMgr. This will create the install action and create all the steps for that install action based on the install command line in the ConfigMgr package/application. It will also create an uninstall action "if" there is an uninstall command specified in the ConfigMgr application. Currently there is a bug in the script that if in the install command line or the uninstall command line there is a .\ in the command, it fails to create correctly.
 
@@ -40,3 +40,20 @@ This script uses an app registration and a secret key so that you can automate t
 ## Sync-ConfigMgrCollectionsToAWUserCollections.ps1
 
 This script will query ConfigMgr for all collections and give you the option to recreate them in AW as user collections. This will take the devices' primary user or last logged on user and add them to a User Collection in AW. It has an option to just sync the ones that you have already brought in so that you can just run it on a schedule and make sure to add any other devices' users down the road. This is currently not working for User Groups, only Device Groups. I will work on that.
+
+## Create-TakeOverPackage.ps1
+
+This script is designed to assist in "taking over" applications that may already be installed. This script creates a single "take over" package that can be ran against machines. The package it creates will in essence run the install package step for every package within your AW environment and marks it as installed through AW. During that process, it will update existing versions to the version released in AW. This will only do this for applications that are installed on that machine and ignore any that are not installed. This script can also add more actions that will create user collections for each "package" and create entitlements to the original package to that user collection. It can then also add the user that runs it to that collection so that when you take over the application, you can also have an inventory of who has which application installed.
+
+## Create-WorkspaceIconPackages.ps1
+
+This script can create a package for all applications on a machine, in essence creating smart icons for any existing application installed, until such time as you replace with managed packages, but give you the ability to start using AW smart icons with existing installed applications.
+
+## Export-AWDataForReporting.ps1
+
+This script is just built to gather a bunch of information from AW and export them to files so that you can create reporting from that data.
+
+## Install-AWDynamicFromCloud_macOS.sh
+
+This script can be ran as a platform script as an installation script to install AW on new machines. It does all the work needed to install, no need to package up any files for installation.
+
