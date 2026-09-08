@@ -1,105 +1,110 @@
-# RMS Role Manager
+# 🤖 RMS Role Manager
 
-## Overview
+> **A practical PowerShell WPF utility for managing Recast Management Server roles, permissions, users, groups, and assignments.**
 
-**RMS Role Manager** is a standalone Windows PowerShell WPF application for administering Recast Management Server roles, permissions, users, groups, and role assignments.
+<p align="center">
+  <strong>Role Management</strong> •
+  <strong>Dynamic Builder Actions</strong> •
+  <strong>Version-Aware Filtering</strong> •
+  <strong>User &amp; Group Administration</strong>
+</p>
 
-The application replaces repetitive RMS API work with a graphical interface for creating, editing, cloning, renaming, importing, exporting, and deleting roles. Administrators select recognizable Right Click Tools capabilities while the application resolves the underlying RMS plugins and permissions.
+---
 
-The current release includes the embedded **Pixel Robot** theme, dynamic Builder Actions, version-aware tool filtering, live color-coded logging, progress reporting, and safety controls designed to protect existing RMS configuration.
+## 📖 Overview
 
-## Key Features
+**RMS Role Manager** replaces repetitive RMS API work with a graphical interface for creating, editing, cloning, renaming, importing, exporting, and deleting roles.
 
-### Role Management
+Administrators select recognizable Right Click Tools capabilities while the utility resolves the underlying RMS plugin and permission mappings. The current release includes the embedded **Pixel Robot** theme, live color-coded logging, progress reporting, dynamic Builder Actions, version-aware filtering, and safeguards that protect existing RMS configuration.
+
+---
+
+## ✨ Key Features
+
+### 🛡️ Role Management and Safe Editing
 
 - List RMS roles and review assigned permissions.
 - Create roles through a categorized checkbox-driven wizard.
 - Edit roles in place without deleting and recreating them.
-- Preview additions and removals before saving changes.
+- Preview additions and removals before saving.
 - Clone roles with permission-copy and verification progress.
-- Rename existing roles.
-- Import and export role definitions through CSV.
-- Check assigned users and groups before deleting a role.
-- Create a pre-edit CSV snapshot before permission changes.
+- Rename, import, export, and safely delete roles.
+- Create a pre-edit CSV snapshot.
+- Preserve partially granted, unmapped, unavailable, and shared permissions.
+- Produce no changes when a role is opened and saved unchanged.
 
-### Safe Permission Editing
+### 🧩 Dynamic Builder Actions
 
-- Distinguishes fully granted, partially granted, and absent tool definitions.
-- Produces no changes when a role is opened and saved without changing selections.
-- Preserves partially granted permissions unless an explicit change is made.
-- Preserves permissions that are unmapped, unavailable, or shared by another selected tool.
-- Removes mapped permissions only after an explicit selection change.
-- Reports permission failures by plugin and permission name.
+- Retrieve the permission catalog through `GetAllPermissions`.
+- Discover permissions associated with the `BuilderAction` plugin.
+- Display Builder Actions in **Create Role** and **Edit Role**.
+- Use action descriptions as friendly labels when available.
+- Preserve the exact RMS permission value, including unique identifiers.
+- Refresh dynamic actions whenever either role wizard opens.
 
-### Dynamic Builder Actions
+### 🧭 Version-Aware Filtering
 
-- Retrieves the RMS permission catalog through `GetAllPermissions`.
-- Discovers permissions associated with the `BuilderAction` plugin.
-- Displays Builder Actions in Create Role and Edit Role.
-- Uses the action description as the friendly display label when available.
-- Preserves the exact RMS permission value, including its unique identifier.
-- Refreshes dynamic actions when either role wizard opens.
+- Detect the RMS host from the configured URL.
+- Read local uninstall registry data when RMS is installed locally.
+- Use PowerShell remoting and Remote Registry for remote RMS hosts.
+- Display the detected RMS version in the lower-right footer.
+- Combine `GetAllPermissions` with a maintained minimum-version catalog.
+- Hide tools that are unsupported by the connected environment.
+- Preserve already assigned permissions that are unavailable in the current catalog.
 
-### Version-Aware Tool Filtering
+### 👥 Users, Groups, and Membership
 
-- Detects the RMS host from the configured URL.
-- Reads local uninstall registry data when RMS is installed on the computer running the utility.
-- Uses PowerShell remoting and Remote Registry as remote-server fallbacks.
-- Displays the detected RMS version in the lower-right footer.
-- Combines `GetAllPermissions` with a maintained minimum-version catalog.
-- Hides tools that are not supported by the connected environment.
-- Preserves already assigned permissions that are unavailable in the current catalog.
-- Skips version filtering when the installed RMS version cannot be determined reliably.
+- List users and groups registered with RMS.
+- Display assigned and available roles.
+- Assign or remove one or multiple roles.
+- Register new users and groups before assignment.
+- Preserve existing role IDs and scope filters.
+- Remove one or multiple principals from RMS.
+- Open a role-first membership view.
+- Add or remove members and refresh the grid immediately.
+- Export principal assignments and role membership to CSV.
+- Prevent a registered principal from being silently left without a role.
 
-### Users, Groups, and Membership
+### 🔐 Authentication and Diagnostics
 
-- Lists users and groups registered with RMS.
-- Displays assigned and available roles for the selected principal.
-- Assigns and removes one or multiple roles.
-- Registers new users and groups before role assignment.
-- Preserves existing role IDs and scope filters during updates.
-- Removes one or multiple principals from RMS.
-- Provides a role-first membership view.
-- Adds or removes role members and refreshes the membership grid immediately.
-- Exports principal assignments and role membership to CSV.
-- Prevents a registered principal from being silently left without a role.
+- Support Windows default authentication and explicit credentials.
+- Display the current API identity as **Connected as** in the footer.
+- Display the active RMS URL and detected RMS version in the footer.
+- Convert authorization failures into clear user-facing messages.
+- Provide live `INFO`, `SUCCESS`, `WARN`, and `ERROR` logging.
+- Display progress for long-running operations.
 
-### Authentication and Diagnostics
+---
 
-- Supports Windows default authentication and explicit credentials.
-- Displays the current API identity as **Connected as** in the footer.
-- Displays the active RMS URL and detected version in the footer.
-- Converts authorization failures into a clear user-facing message.
-- Provides live INFO, SUCCESS, WARN, and ERROR logging.
-- Displays progress for long-running role and membership operations.
-
-## Permission Categories
+## 🗂️ Permission Categories
 
 The Create Role and Edit Role wizards organize permissions into:
 
-- Device Management
+- **Device Management**
   - Client Actions
   - Client Tools
   - Console Tools
   - Security Tools
   - Remote Tools
-- User Management
-- Application Management
-- Content Distribution
-- Console Dashboards
-- Builder Actions
+- **User Management**
+- **Application Management**
+- **Content Distribution**
+- **Console Dashboards**
+- **Builder Actions**
 
-Multi-permission capabilities appear once in the tree while retaining all required plugin and permission mappings.
+> Multi-permission capabilities appear once in the tree while retaining every required plugin and permission mapping.
 
-## Remote Tools
+---
 
-### Remote File Explorer
+## 🖥️ Remote Tools
+
+### 📁 Remote File Explorer
 
 - Browse (Read-Only)
 - Modify Files
 - Delete Files
 
-### Remote Registry
+### 🧰 Remote Registry
 
 - Browse (Read-Only)
 - Modify Keys and Values
@@ -107,30 +112,32 @@ Multi-permission capabilities appear once in the tree while retaining all requir
 
 Browse permissions are included when required by higher capability levels. Unsupported permission and ownership actions remain documented in the source but disabled.
 
-## Prerequisites
+---
+
+## ✅ Prerequisites
 
 - Windows 10, Windows Server 2016, or later.
 - Windows PowerShell 5.1.
-- STA mode for the WPF interface.
+- STA mode for WPF.
 - Network access to the RMS URL.
-- An RMS account authorized for the intended administrative operations.
+- An RMS account authorized for the intended operations.
 - Windows host access when remote registry-based version detection is required.
 
-PowerShell remoting and Remote Registry are optional. If neither is available for a remote RMS host, version filtering is skipped unless a verified fallback version is configured.
+> **Note:** If neither PowerShell remoting nor Remote Registry is available for a remote RMS host, version filtering is skipped unless a verified fallback version is configured.
 
-## Configuration
+---
 
-Review the configuration section near the beginning of the script before deployment.
+## ⚙️ Configuration
 
-### Default RMS URL
+### 🌐 Default RMS URL
 
 ```powershell
 $DefaultRMS = 'https://rms-server.contoso.com:444'
 ```
 
-### Switch RMS Testing Mode
+### 🧪 Switch RMS Testing Mode
 
-The **SWITCH RMS** button is intended for multi-environment testing and is hidden and disabled by default.
+The **SWITCH RMS** button is intended for multi-environment testing. It is hidden, disabled, and does not register its click handler by default.
 
 ```powershell
 $script:EnableRmsSwitch = $false
@@ -142,9 +149,9 @@ Enable the testing-only workflow with:
 $script:EnableRmsSwitch = $true
 ```
 
-When enabled, Switch RMS validates the replacement URL, tests connectivity, clears environment-specific data, reloads permissions and roles, and restores the previous RMS environment if the switch fails.
+When enabled, Switch RMS validates the new URL, tests connectivity, clears environment-specific data, reloads permissions and roles, and restores the previous RMS environment if the switch fails.
 
-### Version Detection Overrides
+### 🏷️ Version Detection Overrides
 
 Use a host override when the RMS URL points to an alias, proxy, load balancer, or VIP:
 
@@ -152,13 +159,13 @@ Use a host override when the RMS URL points to an alias, proxy, load balancer, o
 $Global:RmsVersionDiscoveryHost = 'RMS-SERVER-01'
 ```
 
-Provide a fallback only when automatic detection is unavailable and the installed version has been verified:
+Provide a verified fallback only when automatic detection is unavailable:
 
 ```powershell
 $Global:RmsConfiguredServerVersion = '5.12.2608.1403'
 ```
 
-### Minimum-Version Catalog
+### 📚 Minimum-Version Catalog
 
 Minimum versions are maintained by friendly tool name because `GetAllPermissions` can expose permissions before the corresponding tool is available.
 
@@ -173,11 +180,11 @@ $Global:RmsToolMinimumVersionCatalog = @{
 }
 ```
 
-Only add or change requirements after validating them against an authoritative product source.
+> Add or change minimum-version requirements only after validating them against an authoritative product source.
 
-## Running the Application
+---
 
-Run the script in Windows PowerShell 5.1 with STA mode:
+## 🚀 Running the Application
 
 ```powershell
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\RMSRoleManager.ps1
@@ -185,16 +192,11 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\RMSRoleManager.ps
 
 The script includes elevation handling when administrative rights are required.
 
-## Usage
+---
 
-### Authentication
+## 🧭 Common Workflows
 
-- **Windows default:** Uses the current Windows identity.
-- **Explicit creds:** Prompts for a different account after selecting **APPLY**.
-
-The selected identity appears in the footer and Live Stream.
-
-### Create a Role
+### ➕ Create a Role
 
 1. Select **CREATE NEW ROLE**.
 2. Select the required tools or categories.
@@ -202,7 +204,7 @@ The selected identity appears in the footer and Live Stream.
 4. Enter a unique role name.
 5. Create the role and monitor progress.
 
-### Edit a Role
+### ✏️ Edit a Role
 
 1. Select a role and choose **EDIT ROLE**.
 2. Review the current selections.
@@ -210,37 +212,37 @@ The selected identity appears in the footer and Live Stream.
 4. Preview additions and removals.
 5. Apply the changes.
 
-Opening and saving an unchanged role should produce no permission changes.
+> Opening and saving an unchanged role should produce no permission changes.
 
-### Clone a Role
+### 🧬 Clone a Role
 
 1. Select the source role and choose **CLONE ROLE**.
 2. Enter a unique destination name.
 3. Monitor copy and verification progress.
 
-### Manage Users and Groups
+### 👤 Manage Users and Groups
 
 1. Select **MANAGE USERS & GROUPS**.
 2. Select a registered principal.
 3. Review assigned and available roles.
 4. Assign, revoke, export, or remove as needed.
 
-### View Role Members
+### 👀 View Role Members
 
 1. Select a role and choose **VIEW MEMBERS**.
 2. Add, remove, or export members.
 
-When removing a principal's final role, the application requires a replacement role, principal removal, or cancellation.
+When removing a principal's final role, the utility requires a replacement role, principal removal, or cancellation.
 
-### CSV Import and Export
+### 📄 CSV Import and Export
 
 - **EXPORT ROLE CSV:** Exports the selected role definition.
 - **IMPORT ROLE CSV:** Creates a role from a selected CSV file.
-- Output is written to the configured RMS role export directory.
+- Output is written to the configured export directory.
 
-## Compiling to EXE
+---
 
-Use the PS2EXE module:
+## 📦 Compiling to EXE
 
 ```powershell
 Invoke-PS2EXE `
@@ -256,49 +258,73 @@ Invoke-PS2EXE `
 - `-RequireAdmin` requests elevation.
 - `-STA` is required for WPF.
 
-## Troubleshooting
+---
 
-### User Is Not Authorized
+## 🩺 Troubleshooting
+
+<details>
+<summary><strong>🚫 User is not authorized</strong></summary>
 
 The selected account is not authorized for the requested RMS API action. Apply a different authorized account or contact an RMS administrator.
 
-### RMS Version Shows Unavailable
+</details>
 
-- Confirm that the RMS URL resolves to the Windows server hosting RMS.
-- Verify that the **Recast Management Server** uninstall entry contains `DisplayVersion`.
-- For remote RMS servers, verify PowerShell remoting or Remote Registry access.
+<details>
+<summary><strong>🏷️ RMS version shows Unavailable</strong></summary>
+
+- Confirm the RMS URL resolves to the Windows server hosting RMS.
+- Verify the **Recast Management Server** uninstall entry contains `DisplayVersion`.
+- For a remote server, verify PowerShell remoting or Remote Registry access.
 - Set `$Global:RmsVersionDiscoveryHost` when the URL uses an alias or proxy.
 - Use `$Global:RmsConfiguredServerVersion` only as a verified fallback.
 
-### Builder Actions Do Not Appear
+</details>
+
+<details>
+<summary><strong>🧩 Builder Actions do not appear</strong></summary>
 
 - Review the Live Stream for `GetAllPermissions` results.
 - Confirm the catalog contains permissions using the `BuilderAction` plugin.
 - Review the raw permission-catalog JSON when diagnostic output is enabled.
 
-### A Tool Is Missing from Create or Edit
+</details>
+
+<details>
+<summary><strong>🔎 A tool is missing from Create or Edit</strong></summary>
 
 The tool may have been excluded because a required permission was absent from `GetAllPermissions` or the detected RMS version is below the maintained minimum version. Review the Live Stream for the exclusion reason.
 
-### UI Appears Busy
+</details>
+
+<details>
+<summary><strong>⏳ The UI appears busy</strong></summary>
 
 RMS changes use individual synchronous API requests. The interface refreshes between requests, but it can pause while a single request is in progress.
 
-### Background Image Is Missing
+</details>
 
-The images are embedded as Base64 values. Verify that the image variables in the script remain intact.
+<details>
+<summary><strong>🖼️ The background image is missing</strong></summary>
 
-## Safety Notes
+The theme images are embedded as Base64 values. Verify the image variables remain intact.
+
+</details>
+
+---
+
+## ⚠️ Safety Notes
 
 - Test changes with non-production roles and principals first.
 - `UpdateUserRolesAndScopes` replaces a principal's complete role set. Existing role records and scope filters must be included in every update.
 - Newly assigned roles receive the default unrestricted RMS filter unless additional scoping is configured.
 - Unmanaged and unavailable permissions are preserved during role editing.
 - Batch principal deletion performs one request per principal and can partially succeed.
-- Internal RMS API routes may change between product releases.
+- Internal RMS API routes may change between releases.
 
-## Author
+---
+
+## 👨‍💻 Author
 
 **Chris Antoku**
 
-Current enhancements include dynamic Builder Actions, version-aware filtering, safe in-place role editing, progress-enabled cloning and import, user and group administration, role membership management, connected identity display, and optional multi-environment RMS switching.
+> Current enhancements include dynamic Builder Actions, version-aware filtering, safe in-place role editing, progress-enabled cloning and import, user and group administration, role membership management, connected identity display, and optional multi-environment RMS switching.
