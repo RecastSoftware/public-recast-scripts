@@ -1,4 +1,4 @@
-# New-RecastEntraAppRegistration
+# 🔐 New-RecastEntraAppRegistration
 
 Interactive PowerShell script that creates a Microsoft Entra app registration for **Right Click Tools** or **Application Workspace**, grants only the Microsoft Graph permissions the selected features actually need, and optionally wires the result into the product that will consume it.
 
@@ -22,7 +22,7 @@ Already have an app registration? See [Existing app registration mode](#existing
 
 ---
 
-## Requirements
+## 📋 Requirements
 
 | | |
 |---|---|
@@ -54,7 +54,7 @@ Install-Module -Name Liquit.Server.PowerShell -Scope CurrentUser
 
 ---
 
-## Quick start
+## 🚀 Quick start
 
 ```powershell
 # Interactive — walks through every prompt
@@ -72,7 +72,7 @@ Install-Module -Name Liquit.Server.PowerShell -Scope CurrentUser
 
 ---
 
-## Feature catalog
+## 🔑 Feature catalog
 
 Only the permissions for features you select are requested. Selecting several features de-duplicates the overlap.
 
@@ -107,11 +107,11 @@ Application Workspace registrations also get a Web redirect URI built from your 
 
 > `User.Read` delegated is added explicitly. The Azure **portal** adds it automatically to every new app registration — which is why it appears in the onboarding guide screenshots as "Microsoft Graph (5)" — but the Graph **API** does not. Without it, SSO sign-in is missing its baseline scope.
 
-Sources: [How to Setup Microsoft Entra App Registration to use as an Application Workspace Identity Source](https://scribehow.com/o/xf43_qHmRXqaTl4dNDHGFA/viewer/How_to_Setup_Microsoft_Entra_App_Registration_to_use_as_an_Application_Workspace_Identity_Source__UmRbqg_rSqORT_QX2UTqZQ)
-[Configure Single Sign-On with Microsoft Entra ID](https://docs.recastsoftware.com/help/lws-login-single-sign-on-sso-with-azure-active-directory)
----
+Sources:\
+[How to Setup Microsoft Entra App Registration to use as an Application Workspace Identity Source](https://scribehow.com/o/xf43_qHmRXqaTl4dNDHGFA/viewer/How_to_Setup_Microsoft_Entra_App_Registration_to_use_as_an_Application_Workspace_Identity_Source__UmRbqg_rSqORT_QX2UTqZQ)\
+[Configure Single Sign-On with Microsoft Entra ID](https://docs.recastsoftware.com/help/lws-login-single-sign-on-sso-with-azure)
 
-## Existing app registration mode
+## 🔍 Existing app registration mode
 
 Use `-ExistingAppId` when the app registration already exists and only the product-side configuration is missing — a common situation when the app was created weeks earlier, or created by someone else.
 
@@ -226,7 +226,7 @@ Enable only what the app registration was actually granted. For unattended runs,
 
 ---
 
-## Post-creation configuration
+## 🔧 Post-creation configuration
 
 ### Right Click Tools → RMS service connection
 
@@ -329,7 +329,7 @@ If the identity source already exists it is **not** recreated — recreating one
 
 ---
 
-## Troubleshooting
+## 🩺 Troubleshooting
 
 ### Sign-in hangs on "Just a moment..."
 
