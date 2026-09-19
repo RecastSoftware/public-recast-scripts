@@ -250,7 +250,7 @@ $ProductDefaults = @{
 #   https://docs.recastsoftware.com/help/right-click-tools-graph-api-permissions
 # Application Workspace source:
 #   "How to Setup Microsoft Entra App Registration to use as an Application Workspace
-#    Identity Source" (onboarding guide)
+#    Identity Source" https://scribehow.com/o/xf43_qHmRXqaTl4dNDHGFA/viewer/How_to_Setup_Microsoft_Entra_App_Registration_to_use_as_an_Application_Workspace_Identity_Source__UmRbqg_rSqORT_QX2UTqZQ
 
 $Catalog = [ordered]@{
 
