@@ -1177,7 +1177,7 @@ function Stop-MainProgress {
 # Switch RMS is intended for testing across multiple environments.
 # Keep this false for normal deployments. Set it to $true to display
 # and enable the SWITCH RMS button in the upper-right corner.
-$script:EnableRmsSwitch = $true
+$script:EnableRmsSwitch = $false
 
 $DefaultRMS = "https://cs-rms.cs.recastsoftware.com:444"
 $InputRMS   = Show-InputDialog -Title "RMS Configuration" -Prompt "Enter Recast Management Server URL:" -Default $DefaultRMS
