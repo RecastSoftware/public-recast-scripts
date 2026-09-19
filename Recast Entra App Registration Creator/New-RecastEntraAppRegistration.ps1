@@ -73,6 +73,36 @@
     Identity source Name. If the tenant is Hybrid Joined this must match the NETBIOS /
     pre-Windows 2000 domain name exactly - it is case sensitive.
 
+.PARAMETER ExistingAppId
+    Application (client) ID of an app registration that already exists. Skips creation,
+    permissions, and consent entirely, and goes straight to configuring the product -
+    either the RMS service connection or the Application Workspace identity source.
+
+    Nothing is written to the app registration in this mode; it is only read, to confirm
+    it exists. You will be prompted for the client secret value, because Entra reveals a
+    secret exactly once at creation and there is no API to read it back. Either paste the
+    vaulted value, or add a new secret in the portal first.
+
+    Cannot be combined with -CreateClientSecret.
+
+.PARAMETER SkipAppValidation
+    Skip the read-only Graph lookup that confirms -ExistingAppId exists before
+    configuring. Avoids a sign-in, at the cost of not catching a mistyped GUID until the
+    product rejects it. Requires -TenantId, or prompts for it.
+
+.PARAMETER EnableAzurePhotos
+    -ExistingAppId runs only. Sets AzurePhotos on the Application Workspace identity
+    source. Normally derived from the feature catalog, which is skipped in this mode.
+    Prompted for unless -Force is used.
+
+.PARAMETER EnableGroupWrite
+    -ExistingAppId runs only. Sets AzureWriteMode to GroupMembership on the identity
+    source. Prompted for unless -Force is used.
+
+.PARAMETER ConfigureMailServer
+    -ExistingAppId runs only. Also creates the Microsoft Graph mail server. Prompted for
+    unless -Force is used.
+
 .PARAMETER UseDeviceCode
     Bypass the Windows Web Account Manager (WAM) broker and sign in with a device code.
     Use this when the interactive sign-in window hangs on "Just a moment..." or when the
@@ -104,8 +134,9 @@
     Prompted for if omitted when -ConfigureIdentitySource is used.
 
 .PARAMETER AwModulePath
-    Full path to Liquit.Server.PowerShell.dll, if it is not in a standard install
-    location. Normally unnecessary.
+    Full path to Liquit.Server.PowerShell.dll, for a local Application Workspace install
+    in a non-standard location. Normally unnecessary - if no local DLL is found, the
+    script offers to install the Liquit.Server.PowerShell module from PSGallery instead.
 
 .PARAMETER IdentitySourceDisplayName
     Friendly name shown to end users on the sign-in button, e.g. "Recast Software".
@@ -120,15 +151,26 @@
 .EXAMPLE
     .\New-RecastEntraAppRegistration.ps1 -ZoneUrl "https://contoso.recastsoftware.cloud" -CreateClientSecret
 
+.EXAMPLE
+    # Configure RMS against an app registration created earlier
+    .\New-RecastEntraAppRegistration.ps1 -ExistingAppId '00000000-1111-2222-3333-444444444444' `
+        -ConfigureServiceConnection -RmsServer rms.contoso.com -AllowSelfSignedCertificate
+
+.EXAMPLE
+    # Configure an Application Workspace identity source against an existing app
+    .\New-RecastEntraAppRegistration.ps1 -ExistingAppId '00000000-1111-2222-3333-444444444444' `
+        -ConfigureIdentitySource -ZoneUrl "https://contoso.recastsoftware.cloud" `
+        -IdentitySourceName 'EntraID' -IdentitySourceDisplayName 'Recast Software'
+
 .NOTES
     Requires : PowerShell 5.1+ and the Microsoft.Graph.Authentication / Microsoft.Graph.Applications modules
     Rights   : Application Administrator to create the app
                Privileged Role Administrator (or Global Administrator) to grant consent
-    Author   : Christopher Antoku - Onboarding & Enablement
+    Author   : Christopher Antoku
 
-    IMPORTANT: Run this in a standalone PowerShell window, not the VS Code Integrated
-    Console. That host keeps assemblies loaded between runs, which makes Graph SDK
-    version conflicts unrecoverable without restarting the whole console.
+    Run this in a standalone PowerShell window rather than the VS Code Integrated
+    Console. That host keeps assemblies loaded between runs, which can make Microsoft
+    Graph SDK version conflicts unrecoverable without restarting the console.
 #>
 
 [CmdletBinding()]
@@ -184,7 +226,9 @@ param(
     # Prompted for if omitted when -ConfigureIdentitySource is used.
     [pscredential]$ZoneCredential,
 
-    # Full path to Liquit.Server.PowerShell.dll, if it is not in a standard location.
+    # Full path to Liquit.Server.PowerShell.dll for a local Application Workspace install
+    # in a non-standard location. If no local DLL is found, the script offers to install
+    # the Liquit.Server.PowerShell module from PSGallery instead.
     [string]$AwModulePath,
 
     # Application Workspace mail server, created only when the Mail.Send feature is
@@ -206,7 +250,24 @@ param(
     # Bypass the Windows Web Account Manager (WAM) broker and sign in with a device code.
     # Use when the interactive sign-in hangs on "Just a moment..." or the broker window
     # opens behind the terminal.
-    [switch]$UseDeviceCode
+    [switch]$UseDeviceCode,
+
+    # --------------------------------------------- Existing app registration
+    # Configure a product against an app registration that already exists, skipping
+    # creation, permissions, and consent entirely. Nothing is written to the app.
+
+    # Application (client) ID of the existing app registration.
+    [string]$ExistingAppId,
+
+    # Skip the read-only Graph lookup that confirms -ExistingAppId exists. Avoids a
+    # sign-in, at the cost of not catching a mistyped GUID until the product rejects it.
+    [switch]$SkipAppValidation,
+
+    # Application Workspace identity source settings for -ExistingAppId runs, where there
+    # is no feature catalog to derive them from. Prompted for unless -Force is used.
+    [switch]$EnableAzurePhotos,
+    [switch]$EnableGroupWrite,
+    [switch]$ConfigureMailServer
 )
 
 #region ----------------------------------------------------------- Constants
@@ -249,8 +310,9 @@ $ProductDefaults = @{
 # Right Click Tools source:
 #   https://docs.recastsoftware.com/help/right-click-tools-graph-api-permissions
 # Application Workspace source:
-#   "How to Setup Microsoft Entra App Registration to use as an Application Workspace
-#    Identity Source" https://scribehow.com/o/xf43_qHmRXqaTl4dNDHGFA/viewer/How_to_Setup_Microsoft_Entra_App_Registration_to_use_as_an_Application_Workspace_Identity_Source__UmRbqg_rSqORT_QX2UTqZQ
+#   Recast Software Application Workspace onboarding documentation
+#   https://scribehow.com/o/xf43_qHmRXqaTl4dNDHGFA/viewer/How_to_Setup_Microsoft_Entra_App_Registration_to_use_as_an_Application_Workspace_Identity_Source__UmRbqg_rSqORT_QX2UTqZQ
+
 
 $Catalog = [ordered]@{
 
@@ -311,10 +373,10 @@ $Catalog = [ordered]@{
     'Application Workspace' = [ordered]@{
 
         'AW - Entra ID identity source (REQUIRED)' = @{
-            # User.Read delegated is the baseline sign-in scope. The Azure PORTAL adds it
+            # User.Read delegated is the baseline sign-in scope. The Azure portal adds it
             # automatically to every new app registration, which is why it shows up in the
             # onboarding guide screenshots as "Microsoft Graph (5)". Creating an app via
-            # the Graph API does NOT add it, so we add it explicitly here - without it,
+            # the Graph API does not add it, so it is added explicitly here - without it,
             # SSO sign-in to Application Workspace is missing its baseline scope.
             Application = @('Directory.Read.All')
             Delegated   = @('User.Read')
@@ -497,10 +559,13 @@ function Get-ModuleSearchRoot {
         if ($docs) { $roots.Add((Join-Path $docs $leaf)) }
     } catch { }
 
-    # Literal profile paths, in case Documents is redirected and the other one is real
-    foreach ($base in @($env:USERPROFILE, (Join-Path $env:USERPROFILE 'OneDrive'),
-                        (Join-Path $env:USERPROFILE 'OneDrive - Recast Software'))) {
-        if ($base) { $roots.Add((Join-Path $base "Documents\$leaf")) }
+    # Literal profile paths, in case Documents is redirected and the other one is real.
+    # Any OneDrive-style folder is enumerated rather than hardcoded, because the tenant
+    # name is part of the folder name on synced profiles.
+    if ($env:USERPROFILE) {
+        $roots.Add((Join-Path $env:USERPROFILE "Documents\$leaf"))
+        Get-ChildItem -Path $env:USERPROFILE -Directory -Filter 'OneDrive*' -ErrorAction SilentlyContinue |
+            ForEach-Object { $roots.Add((Join-Path $_.FullName "Documents\$leaf")) }
     }
 
     # Machine-wide
@@ -709,10 +774,9 @@ function Install-ModuleChildProcess {
         Runs the install in a clean child process. Needed when the target module's DLLs are
         already loaded and therefore locked in this session.
 
-        The child VERIFIES on disk and exits with a meaningful code. An earlier version of
-        this script ran 'exit 0' immediately after Install-Module, which masked a failed
-        install completely - PowerShellGet 1.0.0.1 writes provider errors non-terminating,
-        so -ErrorAction Stop never fired. Never trust the exit code alone.
+        The child verifies on disk before exiting, because PowerShellGet 1.0.0.1 writes
+        provider errors as non-terminating and -ErrorAction Stop never fires. The exit
+        code alone is not sufficient evidence that an install succeeded.
     #>
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -1136,11 +1200,11 @@ function Clear-GraphTokenCache {
 
         DO NOT add %LOCALAPPDATA%\.IdentityService here. That is the SHARED Web Account
         Manager (WAM) broker store used by Office, Azure CLI, Teams, and Windows itself.
-        Deleting it out from under the broker mid-session wedges WAM - the sign-in dialog
+        Removing it while the broker is in use can leave WAM in a bad state - the sign-in dialog
         hangs on "Just a moment..." and never returns, which can take the host process
-        down with it. An earlier version of this script did exactly that.
+        down with it.
 
-        Forcing a specific account does not require nuking the shared broker cache.
+        Forcing a specific account does not require clearing the shared broker cache.
         Disconnect-MgGraph plus -ContextScope Process handles session reuse, and
         -UseDeviceAuthentication bypasses the broker entirely when an explicit account
         choice is needed.
@@ -1386,8 +1450,8 @@ function Test-Prerequisites {
     # --- Host warning -------------------------------------------------------
     Test-HostIsolation
 
-    # --- Is this session already poisoned? ----------------------------------
-    # Checked FIRST, before any install or cleanup work. Assemblies cannot be unloaded, so
+    # --- Are conflicting assemblies already bound? --------------------------
+    # Checked before any install or cleanup work. Assemblies cannot be unloaded, so
     # if the wrong version is already bound there is no point doing anything else.
     $preBound = Test-SessionGraphBinding
 
@@ -1426,7 +1490,7 @@ function Test-Prerequisites {
         }
     }
 
-    # --- Clear Graph SDK version sprawl BEFORE importing anything -----------
+    # --- Clear Graph SDK version sprawl before importing anything -----------
     if ($pin) { Resolve-GraphModuleConflict -KeepVersion $pin }
 
     # --- Make sure that version is actually present for every module --------
@@ -1687,58 +1751,113 @@ function Grant-AdminConsent {
 
 function Import-AwModule {
     <#
-        Loads Liquit.Server.PowerShell.dll.
+        Loads the Application Workspace PowerShell module.
 
-        Path logic mirrors the working zone configuration script: the standard install
-        location first, then alongside this script, then anything already on the module
-        path. -Global matters - without it the cmdlets are only visible inside this
-        function's module scope.
+        Resolution order:
+          1. Already loaded in this session
+          2. Liquit.Server.PowerShell.dll from a local Application Workspace install
+             (standard paths, an explicit -ModulePath, or alongside this script)
+          3. The Liquit.Server.PowerShell module from PSGallery, installing it if needed
+
+        The DLL is preferred over the gallery module because on a machine with
+        Application Workspace installed it is guaranteed to match the installed product
+        version. The gallery route covers admin workstations that do not have the
+        product installed locally.
+
+        -Global matters on the DLL import - without it the cmdlets are only visible
+        inside this function's scope.
     #>
     [CmdletBinding()]
     param([string]$ModulePath)
 
-    # Already loaded? Nothing to do.
+    # --- Already loaded? -----------------------------------------------------
     if (Get-Command 'Connect-LiquitWorkspace' -ErrorAction SilentlyContinue) {
         Write-Ok "Application Workspace module already loaded"
         return $true
     }
 
+    # --- Local DLL from an Application Workspace install ---------------------
     $candidates = New-Object System.Collections.Generic.List[string]
 
     if ($ModulePath) { $candidates.Add($ModulePath) }
     $candidates.Add('C:\Program Files (x86)\Liquit Workspace\PowerShell\Liquit.Server.PowerShell.dll')
     $candidates.Add('C:\Program Files\Liquit Workspace\PowerShell\Liquit.Server.PowerShell.dll')
 
-    # Next to this script, the way the zone config script falls back.
     if ($PSScriptRoot) {
         $candidates.Add((Join-Path $PSScriptRoot 'Liquit.Server.PowerShell.dll'))
     }
 
     $found = $candidates | Where-Object { $_ -and (Test-Path $_ -ErrorAction SilentlyContinue) } | Select-Object -First 1
 
-    if (-not $found) {
-        Write-Err "Unable to find Liquit.Server.PowerShell.dll"
-        Write-Host "           Looked in:" -ForegroundColor Gray
-        $candidates | ForEach-Object { Write-Host "             $_" -ForegroundColor DarkGray }
-        Write-Host ""
-        Write-Host "    Install Application Workspace tooling on this machine, or pass the path:" -ForegroundColor White
-        Write-Host "      -AwModulePath 'D:\path\to\Liquit.Server.PowerShell.dll'" -ForegroundColor Cyan
-        Write-Host ""
-        return $false
+    if ($found) {
+        try {
+            Import-Module $found -Global -ErrorAction Stop
+            Write-Ok "Application Workspace module loaded"
+            Write-Host "           $found" -ForegroundColor DarkGray
+
+            # Loaded by the zone configuration flow for package handling. Harmless here,
+            # and keeps behaviour consistent if a later call needs them.
+            try {
+                [System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression") | Out-Null
+                [System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression.FileSystem") | Out-Null
+            } catch { }
+
+            return $true
+        }
+        catch {
+            Write-Warn "Found the DLL but could not import it: $($_.Exception.Message)"
+            Write-Host "           Falling back to the PSGallery module." -ForegroundColor Gray
+        }
+    }
+
+    # --- PSGallery module ----------------------------------------------------
+    $galleryModule = 'Liquit.Server.PowerShell'
+
+    if ((Get-ModuleVersionsOnDisk -Name $galleryModule).Count -eq 0) {
+        Write-Warn "The Application Workspace PowerShell module is not installed."
+        if ($found) {
+            Write-Host "           The local DLL was present but failed to load." -ForegroundColor Gray
+        }
+        else {
+            Write-Host "           No local Application Workspace install was found." -ForegroundColor Gray
+        }
+
+        if (-not (Confirm-Action "Install $galleryModule from PSGallery ($script:ModuleScope scope)?")) {
+            Write-Host ""
+            Write-Host "    Install it manually, then re-run:" -ForegroundColor White
+            Write-Host "      Install-Module -Name $galleryModule -Scope $script:ModuleScope" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "    Or point at a local install:" -ForegroundColor White
+            Write-Host "      -AwModulePath 'D:\path\to\Liquit.Server.PowerShell.dll'" -ForegroundColor Cyan
+            Write-Host ""
+            return $false
+        }
+
+        Initialize-PackageSource
+        if (-not (Install-RecastModule -Name $galleryModule)) {
+            return $false
+        }
     }
 
     try {
-        Import-Module $found -Global -ErrorAction Stop
-        Write-Ok "Application Workspace module loaded"
-        Write-Host "           $found" -ForegroundColor DarkGray
+        Import-Module -Name $galleryModule -Global -ErrorAction Stop
+        $loaded = Get-Module -Name $galleryModule
+        Write-Ok "Application Workspace module loaded$(if ($loaded.Version) { " ($($loaded.Version))" })"
+        if ($loaded.ModuleBase) { Write-Host "           $($loaded.ModuleBase)" -ForegroundColor DarkGray }
     }
     catch {
-        Write-Err "Could not import the Application Workspace module: $($_.Exception.Message)"
+        Write-Err "Could not import $galleryModule : $($_.Exception.Message)"
         return $false
     }
 
-    # The zone config script loads these for package handling. Harmless here, and keeps
-    # behaviour consistent if a later call needs them.
+    # Confirm the cmdlets this script actually depends on are present, rather than
+    # assuming a clean import means a usable module.
+    if (-not (Get-Command 'Connect-LiquitWorkspace' -ErrorAction SilentlyContinue)) {
+        Write-Err "$galleryModule imported, but Connect-LiquitWorkspace is not available."
+        Write-Host "           The installed module version may not match this script's expectations." -ForegroundColor Gray
+        return $false
+    }
+
     try {
         [System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression") | Out-Null
         [System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression.FileSystem") | Out-Null
@@ -1808,7 +1927,7 @@ function Connect-AwZone {
         return $false
     }
 
-    # Never trust the absence of an error - confirm the context actually works.
+    # Confirm the context actually works rather than assuming the connect succeeded.
     try {
         $null = Get-LiquitIdentitySource -ErrorAction Stop 2>$null
         return $true
@@ -1861,7 +1980,7 @@ function New-AwEntraIdentitySource {
     # Loading the module is NOT the same as being connected. Every Liquit cmdlet fails
     # with "LiquitContext ... No connection is available to service this operation" when
     # there is no context, and it fails NON-TERMINATING - so without this the script
-    # sails past and reports success on nothing.
+    # would continue and report success without having configured anything.
     if (-not (Connect-AwZone -ZoneUri $ZoneUri -Credential $ZoneCredential)) {
         throw "No Application Workspace zone connection."
     }
@@ -1882,7 +2001,7 @@ function New-AwEntraIdentitySource {
     }
 
     # --- Endpoint URIs -------------------------------------------------------
-    # NOTE: the logout URI keeps a LITERAL ${slo.return.url} token - Application Workspace
+    # The logout URI keeps a literal ${slo.return.url} token - Application Workspace
     # substitutes it at sign-out time. The backtick stops PowerShell expanding it here.
     $tokenUri         = "https://login.microsoftonline.com/$TenantId/oauth2/token"
     $authorizationUri = "https://login.microsoftonline.com/$TenantId/oauth2/authorize"
@@ -1892,11 +2011,10 @@ function New-AwEntraIdentitySource {
     $existing = Get-LiquitIdentitySource -Name $Name -ErrorAction SilentlyContinue
 
     if (-not $existing) {
-        # -ErrorAction Stop is ESSENTIAL here. The Liquit cmdlets write their failures as
-        # NON-TERMINATING errors, so without it a failed create does not throw, the catch
-        # never runs, and execution falls straight through to the success message. That is
-        # exactly how this reported "Identity source 'CX' created" over a wall of
-        # ArgumentException / NullReferenceException output.
+        # -ErrorAction Stop is required here. The Liquit cmdlets write their failures as
+        # non-terminating errors, so without it a failed create does not throw, the catch
+        # never runs, and execution falls through to the success message.
+        #
         # Driven by the features chosen earlier, so a consented permission actually gets
         # used instead of sitting there switched off.
         #   User.Read.All            -> AzurePhotos    Enabled
@@ -1932,7 +2050,7 @@ function New-AwEntraIdentitySource {
             throw "New-LiquitIdentitySource failed: $($_.Exception.Message)"
         }
 
-        # Never trust the absence of an exception. Confirm it is actually there.
+        # Confirm the object exists rather than relying on the absence of an exception.
         $created = Get-LiquitIdentitySource -Name $Name -ErrorAction SilentlyContinue
         if (-not $created) {
             throw "New-LiquitIdentitySource reported no error, but '$Name' does not exist afterwards. Check the zone connection and the AW audit log."
@@ -2016,7 +2134,7 @@ function New-AwGraphMailServer {
         $Name = if ($entered) { $entered } else { $default }
     }
 
-    # From is REQUIRED by the API and has no sensible default - it must be a real mailbox
+    # From is required by the API and has no sensible default - it must be a real mailbox
     # the app registration is allowed to send as.
     if (-not $From) {
         Write-Host "    The sender address must be a mailbox in this tenant that the app" -ForegroundColor Gray
@@ -2083,50 +2201,42 @@ function New-AwGraphMailServer {
 
 #region ------------------------------------ RMS Entra ID service connection
 #
-#  ###############################################################################
-#  #  UNVERIFIED API SURFACE                                                     #
-#  #                                                                             #
-#  #  The RMS API is not publicly documented. Every endpoint path, payload field #
-#  #  name, and the secret encryption scheme below is an ASSUMPTION, isolated in #
-#  #  $RmsApiContract so it can be corrected in one place.                       #
-#  #                                                                             #
-#  #  Run Show-RmsApiCapture for the two-minute procedure to capture the real    #
-#  #  contract from your own RMS using browser devtools.                         #
-#  #                                                                             #
-#  #  HIGHEST RISK: SecretPadding. The wrong RSA padding still produces a valid  #
-#  #  base64 blob the server accepts, so the connection is created successfully  #
-#  #  and only fails later at auth time. Confirm before customer use.            #
-#  ###############################################################################
+#  Creates an AzureActiveDirectory service connection in Recast Management Server using
+#  the app registration produced above.
+#
+#  A deployed and authorized Recast Proxy is required. RMS does not store service
+#  connection credentials in plain text - it encrypts them server-side against the
+#  certificate of the proxy that will use the connection, which is why ListProxies runs
+#  first and the proxy's certificate thumbprint is submitted with the request.
+#
+#  Endpoint routes and payload field names are held in one table so they can be adjusted
+#  in a single place if a future RMS version changes them.
 
 $script:RmsApiContract = @{
-    ApiBase = 'api'                                                              #>>> VERIFY
 
-    ListProxies                    = 'Administration/ListProxies'                #>>> VERIFY
-    CreateAzureAdServiceConnection = 'Administration/CreateAzureActiveDirectoryServiceConnection'  #>>> VERIFY
-    TestServiceConnection          = 'Administration/TestServiceConnection'      #>>> VERIFY
+    # --- Endpoints -------------------------------------------------------------
+    ApiBase                        = 'api'
+    ListProxies                    = 'Administration/ListProxies'
+    CreateAzureAdServiceConnection = 'Administration/CreateAzureActiveDirectoryServiceConnection'
+    TestServiceConnection          = 'Administration/TestServiceConnection'
 
-    # CONFIRMED against ListProxies via RMS Administration > Test Tools > Action Tester.
-    # Actual columns returned: Id, ComputerName, UserName, Certificate, Authorized,
-    # Connected, Version, Internal.
+    # --- Proxy object fields returned by ListProxies ---------------------------
+    # Id, ComputerName, UserName, Certificate, Authorized, Connected, Version, Internal
     ProxyIdField          = 'Id'
     ProxyNameField        = 'ComputerName'
-    ProxyAccountField     = 'UserName'          # NOT 'ServiceAccount' - corrected from live output
+    ProxyAccountField     = 'UserName'
     ProxyCertificateField = 'Certificate'
     ProxyAuthorizedField  = 'Authorized'
     ProxyConnectedField   = 'Connected'
     ProxyVersionField     = 'Version'
     ProxyInternalField    = 'Internal'
 
-    # CONFIRMED against CreateAzureActiveDirectoryServiceConnection via Action Tester.
-    # Declared input schema:
-    #   "Name": (String), "TenantID": (String), "ClientID": (String),
-    #   "ClientSecret": (String), "Confirmed": (Boolean), "ProxyCertificate": (String)
+    # --- CreateAzureActiveDirectoryServiceConnection request fields ------------
+    # Note the casing: TenantID and ClientID use a capital D.
     #
-    # NOTE THE CASING: TenantID / ClientID use a capital D. Not TenantId / ClientId.
-    #
-    # NOTE THERE IS NO ProxyId. The API takes the proxy's CERTIFICATE string, which is
-    # how the server identifies which proxy the connection belongs to - and which public
-    # key the ClientSecret was encrypted against. That is why ListProxies must run first.
+    # There is no ProxyId field. The API identifies the proxy by its certificate
+    # thumbprint, which is also how the server locates the key used to protect the
+    # client secret.
     Body = @{
         Name             = 'Name'
         TenantId         = 'TenantID'
@@ -2135,53 +2245,6 @@ $script:RmsApiContract = @{
         Confirmed        = 'Confirmed'
         ProxyCertificate = 'ProxyCertificate'
     }
-
-    # ---------------------------------------------------------------- OPEN QUESTION
-    # Does the CLIENT encrypt the secret, or does the SERVER?
-    #
-    # The declared schema field is plain "ClientSecret": (String) - not
-    # "EncryptedClientSecret" - and the payload also carries "ProxyCertificate".
-    # That reads as: hand the server the secret plus the certificate, and let the
-    # server encrypt it against that proxy's public key.
-    #
-    # The competing reading is that the client is expected to encrypt first, and the
-    # certificate is in the payload purely to identify the proxy.
-    #
-    # Default is $false (send as-is), because it matches the declared field name and
-    # because it fails LOUDLY if wrong. Client-side encryption that the server did not
-    # expect produces a connection that saves cleanly and then fails every auth attempt,
-    # which is far harder to diagnose.
-    #
-    # If the connection is created but will not authenticate, flip this to $true.
-    EncryptSecretClientSide = $false                                             #>>> VERIFY
-
-    # Only used when EncryptSecretClientSide = $true.
-    # 'OaepSHA256' | 'OaepSHA1' | 'Pkcs1'
-    SecretPadding = 'OaepSHA256'                                                 #>>> VERIFY
-}
-
-function Show-RmsApiCapture {
-    <# Prints how to capture the real RMS API contract from browser devtools. #>
-    Write-Host ""
-    Write-Host "  Capturing the real RMS API contract" -ForegroundColor White
-    Write-Host "  -----------------------------------" -ForegroundColor DarkGray
-    Write-Host "  The RMS web UI calls the same API this script does, so watch it once." -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "  1. Open RMS in a browser, press F12, Network tab." -ForegroundColor White
-    Write-Host "  2. Tick 'Preserve log', filter to Fetch/XHR." -ForegroundColor White
-    Write-Host "  3. Administration > Service Connections > Add service connection." -ForegroundColor White
-    Write-Host "  4. Pick AzureActiveDirectory; watch the proxy dropdown populate." -ForegroundColor White
-    Write-Host "       -> that call is ListProxies. Note the path and the proxy fields." -ForegroundColor DarkGray
-    Write-Host "  5. Fill in throwaway values and submit." -ForegroundColor White
-    Write-Host "       -> right-click > Copy > Copy as PowerShell for the exact payload." -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "  Then correct `$RmsApiContract near the top of the RMS region." -ForegroundColor White
-    Write-Host ""
-    Write-Host "  Devtools will NOT reveal the secret padding mode - you only see the" -ForegroundColor Yellow
-    Write-Host "  finished blob. Ask the RMS dev team, or test against CS-TEST-RMS and" -ForegroundColor Yellow
-    Write-Host "  flip SecretPadding to 'Pkcs1' if auth fails on a connection that was" -ForegroundColor Yellow
-    Write-Host "  created without error." -ForegroundColor Yellow
-    Write-Host ""
 }
 
 function Resolve-RmsBaseUri {
@@ -2279,7 +2342,7 @@ function Invoke-RmsApi {
 
         # A 404 here almost always means the contract table is wrong, not a broken server.
         if ($status -eq 404) {
-            $msg += "`n           A 404 usually means the endpoint path in `$RmsApiContract is wrong. Run Show-RmsApiCapture."
+            $msg += "`n           A 404 usually means the endpoint path in `$RmsApiContract does not match this RMS version."
         }
         if ($detail) { $msg += "`n           Server said: $($detail.Trim())" }
         throw $msg
@@ -2290,7 +2353,7 @@ function Test-RmsActionEnvelope {
     <#
         True when an object is an RMS action-result envelope rather than the payload.
 
-        CONFIRMED shape, from dumping a live ListProxies response:
+        Response shape:
             InputParameters, Result, Index, Total
 
         RMS actions run over SignalR and return their output wrapped like this. The real
@@ -2311,8 +2374,8 @@ function Test-RmsActionResult {
 
         RMS wraps every action twice. The outer envelope carries InputParameters/Index/
         Total; inside that sits this success-or-error object; and the real payload is in
-        ITS .Result. Unwrapping only the outer layer leaves you holding this, which is
-        exactly why the proxy grid rendered as <unknown>.
+        its .Result. Unwrapping only the outer layer leaves this object rather than the
+        payload.
     #>
     param($Object)
 
@@ -2325,7 +2388,7 @@ function Expand-RmsResult {
     <#
         Unwraps an RMS response down to the actual payload objects.
 
-        CONFIRMED shape from a live ListProxies dump - note the DOUBLE nesting:
+        Response shape - note the double nesting:
 
             [                                   <- one entry per item
               {
@@ -2417,10 +2480,8 @@ function Get-RmsProxy {
     <#
         ListProxies.
 
-        The response is an ACTION ENVELOPE, not a bare array - see Expand-RmsResult.
-        An earlier version of this script returned the envelopes themselves, which is why
-        every proxy rendered as <unknown>: it was reading ComputerName off an object whose
-        only properties were InputParameters/Result/Index/Total.
+        The response is an action envelope rather than a bare array - see Expand-RmsResult
+        for the shape and the unwrapping logic.
     #>
     [CmdletBinding()]
     param(
@@ -2486,7 +2547,7 @@ function Get-RmsRawResponse {
         without guessing.
 
     .EXAMPLE
-        Get-RmsRawResponse -Server cs-rms.cs.recastsoftware.com -Endpoint 'Administration/ListProxies' -AllowSelfSignedCertificate
+        Get-RmsRawResponse -Server rms.contoso.com -Endpoint 'Administration/ListProxies' -AllowSelfSignedCertificate
     #>
     [CmdletBinding()]
     param(
@@ -2624,7 +2685,7 @@ function Select-RmsProxy {
         @($Proxies[0].PSObject.Properties.Name) | ForEach-Object {
             Write-Host "             $_" -ForegroundColor DarkGray
         }
-        Write-Host "           Run Show-RmsApiCapture for how to correct the contract." -ForegroundColor Gray
+        Write-Host "           Update the Proxy*Field values in `$RmsApiContract to match." -ForegroundColor Gray
     }
 
     $usableRows = @($rows | Where-Object { $_.Usable })
@@ -2661,7 +2722,7 @@ function Get-RmsProxyCertificateReference {
         Returns the proxy's certificate REFERENCE - which is what ListProxies actually
         gives us, and what CreateAzureActiveDirectoryServiceConnection wants back.
 
-        CONFIRMED from a live ListProxies dump: the Certificate field is a 40-character
+        The Certificate field is a 40-character
         SHA-1 THUMBPRINT, not a base64-encoded certificate:
 
             "Certificate": "0FD759ACCDBCFD231C89C389FEAAC40E3496C2F4"
@@ -2672,10 +2733,9 @@ function Get-RmsProxyCertificateReference {
             "Certificate":  "internal",
             "Internal":     true
 
-        This has a hard consequence: a thumbprint carries NO PUBLIC KEY, so the client
-        cannot encrypt the secret itself. The server must be doing the encryption, using
-        this thumbprint to look up the proxy's certificate in its own store. That settles
-        EncryptSecretClientSide = $false.
+        A thumbprint carries no public key, so the client cannot encrypt the secret
+        itself. The server performs the encryption, resolving the proxy certificate from
+        this thumbprint.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Proxy)
@@ -2738,49 +2798,17 @@ function Get-RmsProxyCertificateReference {
     return $value
 }
 
-function Protect-RmsSecret {
-    <#
-        Encrypts the client secret with the proxy's public key, so only that proxy can
-        decrypt it. See the risk note at the top of this region regarding padding.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
-        [Parameter(Mandatory)][string]$Secret
-    )
-
-    $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($Certificate)
-    if (-not $rsa) { throw "The proxy certificate does not expose an RSA public key." }
-
-    $bytes    = [Text.Encoding]::UTF8.GetBytes($Secret)
-    $maxBytes = ($rsa.KeySize / 8) - 66   # OAEP-SHA256 overhead
-    if ($bytes.Length -gt $maxBytes) {
-        throw "Secret is $($bytes.Length) bytes; max for this key with OAEP-SHA256 is $maxBytes."
-    }
-
-    $padding = switch ($script:RmsApiContract.SecretPadding) {
-        'OaepSHA256' { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256 }
-        'OaepSHA1'   { [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA1 }
-        'Pkcs1'      { [System.Security.Cryptography.RSAEncryptionPadding]::Pkcs1 }
-        default      { throw "Unknown SecretPadding '$($script:RmsApiContract.SecretPadding)' in `$RmsApiContract." }
-    }
-
-    $encrypted = $rsa.Encrypt($bytes, $padding)
-    Write-Ok "Secret encrypted with proxy public key ($($script:RmsApiContract.SecretPadding), $($rsa.KeySize)-bit)"
-    return [Convert]::ToBase64String($encrypted)
-}
-
 function Add-RmsAzureAdServiceConnection {
     <#
     .SYNOPSIS
-        End to end: connect to RMS, ListProxies, encrypt the secret against the chosen
-        proxy certificate, then CreateAzureActiveDirectoryServiceConnection.
+        End to end: connect to RMS, list the proxies, then create the
+        AzureActiveDirectory service connection against the selected proxy.
 
     .DESCRIPTION
-        The proxy certificate step is not optional. RMS never stores service connection
-        credentials in plain text - it encrypts them with the public key of the Recast
-        Proxy that will use the connection, so only that proxy can decrypt them. That is
-        why ListProxies has to run before the secret can be submitted.
+        The proxy selection step is not optional. RMS does not store service connection
+        credentials in plain text - they are protected against the certificate of the
+        proxy that will use the connection, so the proxy must be identified before the
+        secret can be submitted.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -2792,7 +2820,7 @@ function Add-RmsAzureAdServiceConnection {
         [Parameter(Mandatory)][string]$ClientSecret,
         [pscredential]$Credential,
         [switch]$AllowSelfSignedCertificate,
-        # Confirmed defaults to TRUE. A service connection created unconfirmed still has
+        # Confirmed defaults to true. A service connection created unconfirmed still has
         # to be confirmed by hand in RMS before it will be used, which defeats the point
         # of automating it. Pass -MarkConfirmed:$false to create it unconfirmed.
         [bool]$MarkConfirmed = $true,
@@ -2818,7 +2846,7 @@ function Add-RmsAzureAdServiceConnection {
         Write-Host "      - Wrong port. RMS defaults to 444; dev installs often use 44339." -ForegroundColor Gray
         Write-Host "      - Self-signed RMS certificate. Re-run with -AllowSelfSignedCertificate." -ForegroundColor Gray
         Write-Host "      - Your account has no RMS permissions." -ForegroundColor Gray
-        Write-Host "      - Endpoint path wrong in `$RmsApiContract. Run Show-RmsApiCapture." -ForegroundColor Gray
+        Write-Host "      - Endpoint path in `$RmsApiContract does not match this RMS version." -ForegroundColor Gray
         throw "Could not reach or authenticate to RMS at $baseUri"
     }
 
@@ -2842,33 +2870,12 @@ function Add-RmsAzureAdServiceConnection {
 
     # --- Secret handling -----------------------------------------------------
     #
-    # RESOLVED. ListProxies returns Certificate as a 40-character SHA-1 THUMBPRINT, not a
-    # certificate blob. A thumbprint contains no public key, so the client CANNOT encrypt
-    # the secret - the server must do it, looking the certificate up by thumbprint in its
-    # own store. That also explains the plain "ClientSecret": (String) field name.
-    #
-    # EncryptSecretClientSide is kept only for the case where some other RMS version
-    # returns a full certificate blob instead. It is off by default and should stay off.
-    if ($c.EncryptSecretClientSide) {
-        if ($rawProxyCertificate -match '^[0-9A-Fa-f]{40}$' -or $rawProxyCertificate -ieq 'internal') {
-            Write-Warn "EncryptSecretClientSide is on, but this proxy exposes only a thumbprint."
-            Write-Host "           A thumbprint has no public key, so client-side encryption is not" -ForegroundColor Gray
-            Write-Host "           possible. Sending the secret as-is instead." -ForegroundColor Gray
-            $secretForBody = $ClientSecret
-        }
-        else {
-            Write-Step "Encrypting the client secret for this proxy"
-            $b64  = ($rawProxyCertificate -replace '-----BEGIN CERTIFICATE-----', '' `
-                                          -replace '-----END CERTIFICATE-----', '' `
-                                          -replace '\s', '')
-            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,[Convert]::FromBase64String($b64))
-            $secretForBody = Protect-RmsSecret -Certificate $cert -Secret $ClientSecret
-        }
-    }
-    else {
-        $secretForBody = $ClientSecret
-        Write-Ok "Client secret sent as-is (server encrypts it using the proxy thumbprint)"
-    }
+    # ListProxies returns Certificate as a 40-character SHA-1 thumbprint rather than a
+    # certificate blob, so the client has no public key to encrypt with. The server
+    # performs the encryption, resolving the certificate from the thumbprint submitted
+    # with the request - which is consistent with the plain "ClientSecret" field name.
+    $secretForBody = $ClientSecret
+    Write-Ok "Client secret submitted (encrypted server-side against the proxy certificate)"
 
     # --- Create --------------------------------------------------------------
     Write-Step "Creating the AzureActiveDirectory service connection"
@@ -2884,8 +2891,8 @@ function Add-RmsAzureAdServiceConnection {
         return
     }
 
-    # The API identifies the proxy by its CERTIFICATE, not by an Id - so we send back the
-    # raw certificate string exactly as ListProxies returned it.
+    # The API identifies the proxy by its certificate, not by an Id, so the value is sent
+    # back exactly as ListProxies returned it.
     $f = $c.Body
     $body = @{
         $f.Name             = $Name
@@ -2938,6 +2945,603 @@ function Add-RmsAzureAdServiceConnection {
 
 #endregion
 
+#region ------------------------------ Existing app registration mode
+
+function ConvertFrom-SecureStringPlain {
+    <#
+        Converts a SecureString to plain text, because the RMS and Application Workspace
+        APIs both take the secret as a string. The unmanaged BSTR is always freed, even
+        if the conversion throws.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Security.SecureString]$Secure)
+
+    $bstr = [IntPtr]::Zero
+    try {
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
+        return [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+    }
+    finally {
+        if ($bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+    }
+}
+
+function Read-ClientSecretValue {
+    <#
+        Prompts for the client secret VALUE.
+
+        Entra reveals a secret value exactly once, at creation. There is no API to read
+        it back afterwards, which is why this mode has to ask: either paste the vaulted
+        value, or add a new secret in the portal first.
+    #>
+    [CmdletBinding()]
+    param()
+
+    Write-Host ""
+    Write-Host "    The client secret VALUE is required - not the Secret ID." -ForegroundColor Gray
+    Write-Host "    Entra only shows it once, at creation. If you do not have it, add a new" -ForegroundColor Gray
+    Write-Host "    secret under App registrations > Certificates & secrets and use that." -ForegroundColor Gray
+
+    do {
+        $secure = Read-Host "    Client secret value" -AsSecureString
+        if (-not $secure -or $secure.Length -eq 0) {
+            Write-Warn "A client secret is required to configure the product."
+            $secure = $null
+        }
+    } until ($secure)
+
+    return (ConvertFrom-SecureStringPlain -Secure $secure)
+}
+
+function Get-GraphPermissionNameMap {
+    <#
+        Builds a GUID -> permission name lookup from the Microsoft Graph service principal.
+
+        Resolve-GraphPermissions does this in the create direction (name -> GUID). This is
+        the reverse, needed to make sense of an app registration that already exists:
+        RequiredResourceAccess stores only GUIDs, so without this the report would be a
+        list of meaningless IDs.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$GraphSp)
+
+    $map = @{}
+
+    foreach ($role in $GraphSp.AppRoles) {
+        if ($role.Id) { $map["$($role.Id)"] = @{ Name = $role.Value; Type = 'Application' } }
+    }
+    foreach ($scope in $GraphSp.Oauth2PermissionScopes) {
+        if ($scope.Id) { $map["$($scope.Id)"] = @{ Name = $scope.Value; Type = 'Delegated' } }
+    }
+
+    return $map
+}
+
+function Get-AppRegistrationPermissionState {
+    <#
+        Returns what an app registration ASKS FOR and what has actually been CONSENTED.
+
+        These are different things and the difference matters. RequiredResourceAccess on
+        the app registration is a request - it is what the portal shows under API
+        permissions. The actual grant lives on the SERVICE PRINCIPAL:
+
+          Application permissions -> appRoleAssignments
+          Delegated permissions   -> oauth2PermissionGrants
+
+        A permission listed but never consented looks correct in the portal at a glance
+        and still fails at runtime with an authorization error. Surfacing both is the
+        whole point of this report.
+
+        Consent reads are best-effort: they need more scope than reading the app does, so
+        a failure degrades to "requested only" rather than aborting.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)]$GraphSp
+    )
+
+    $nameMap = Get-GraphPermissionNameMap -GraphSp $GraphSp
+
+    $app = Get-MgApplication -Filter "appId eq '$AppId'" -ErrorAction Stop | Select-Object -First 1
+    if (-not $app) { throw "App registration '$AppId' not found." }
+
+    # --- Requested, from the app registration --------------------------------
+    $requestedApp = New-Object System.Collections.Generic.List[string]
+    $requestedDel = New-Object System.Collections.Generic.List[string]
+    $unknownIds   = New-Object System.Collections.Generic.List[string]
+
+    $graphAccess = @($app.RequiredResourceAccess | Where-Object { $_.ResourceAppId -eq $GraphAppId })
+    foreach ($entry in $graphAccess) {
+        foreach ($ra in $entry.ResourceAccess) {
+            $hit = $nameMap["$($ra.Id)"]
+            if (-not $hit) { $unknownIds.Add("$($ra.Id)"); continue }
+            if ($ra.Type -eq 'Role') { if ($requestedApp -notcontains $hit.Name) { $requestedApp.Add($hit.Name) } }
+            else                     { if ($requestedDel -notcontains $hit.Name) { $requestedDel.Add($hit.Name) } }
+        }
+    }
+
+    # --- Consented, from the service principal -------------------------------
+    $consentedApp   = New-Object System.Collections.Generic.List[string]
+    $consentedDel   = New-Object System.Collections.Generic.List[string]
+    $consentReadable = $true
+    $spMissing       = $false
+
+    $sp = Get-MgServicePrincipal -Filter "appId eq '$AppId'" -ErrorAction SilentlyContinue |
+          Select-Object -First 1
+
+    if (-not $sp) {
+        # An app registration with no enterprise application cannot hold any grant.
+        $spMissing = $true
+    }
+    else {
+        try {
+            $assignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All -ErrorAction Stop
+            foreach ($a in $assignments) {
+                if ($a.ResourceId -ne $GraphSp.Id) { continue }
+                $hit = $nameMap["$($a.AppRoleId)"]
+                if ($hit -and $consentedApp -notcontains $hit.Name) { $consentedApp.Add($hit.Name) }
+            }
+        }
+        catch { $consentReadable = $false }
+
+        try {
+            $filter = "clientId eq '$($sp.Id)' and resourceId eq '$($GraphSp.Id)'"
+            $grants = (Invoke-MgGraphRequest -Method GET `
+                        -Uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=$filter" `
+                        -ErrorAction Stop).value
+            foreach ($g in $grants) {
+                foreach ($s in ($g.scope -split ' ')) {
+                    if ($s -and $consentedDel -notcontains $s) { $consentedDel.Add($s) }
+                }
+            }
+        }
+        catch { $consentReadable = $false }
+    }
+
+    return [pscustomobject]@{
+        DisplayName      = $app.DisplayName
+        AppId            = $app.AppId
+        ObjectId         = $app.Id
+        RequestedApp     = @($requestedApp)
+        RequestedDel     = @($requestedDel)
+        ConsentedApp     = @($consentedApp)
+        ConsentedDel     = @($consentedDel)
+        UnknownIds       = @($unknownIds)
+        ConsentReadable  = $consentReadable
+        ServicePrincipal = $sp
+        SpMissing        = $spMissing
+    }
+}
+
+function Show-FeatureCoverageReport {
+    <#
+        Maps the permissions actually on an app registration back onto the feature
+        catalog, so an admin can see which product features will work, which are missing
+        a permission, and exactly which permission to add.
+
+        Reports against CONSENTED permissions where consent could be read, because that is
+        what determines whether a feature works at runtime. Where consent could not be
+        read, it falls back to requested and says so rather than implying more certainty
+        than it has.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$PermissionState,
+        [Parameter(Mandatory)][string]$Product
+    )
+
+    $features = $Catalog[$Product]
+    if (-not $features) { throw "Unknown product '$Product'." }
+
+    $ps = $PermissionState
+
+    # Consent is the real gate. Without it, fall back to what was requested.
+    $useConsent = $ps.ConsentReadable -and -not $ps.SpMissing
+    $effectiveApp = if ($useConsent) { $ps.ConsentedApp } else { $ps.RequestedApp }
+    $effectiveDel = if ($useConsent) { $ps.ConsentedDel } else { $ps.RequestedDel }
+
+    Write-Step "Feature coverage for $Product"
+
+    if ($ps.SpMissing) {
+        Write-Warn "This app registration has no enterprise application (service principal)."
+        Write-Host "           No permission can be consented until one exists, so nothing below" -ForegroundColor Gray
+        Write-Host "           will work yet." -ForegroundColor Gray
+        Write-Host ""
+    }
+    elseif (-not $ps.ConsentReadable) {
+        Write-Warn "Consent status could not be read - showing REQUESTED permissions instead."
+        Write-Host "           A permission can be requested and never consented, so treat" -ForegroundColor Gray
+        Write-Host "           'Available' below as 'requested' rather than confirmed." -ForegroundColor Gray
+        Write-Host ""
+    }
+    else {
+        Write-Host "    Based on permissions actually consented in this tenant." -ForegroundColor Gray
+        Write-Host ""
+    }
+
+    Write-Host ("    {0,-52} {1,-14} {2}" -f 'Feature', 'Status', 'Missing') -ForegroundColor White
+    Write-Host ("    {0}" -f ('-' * 110)) -ForegroundColor DarkGray
+
+    $available = 0
+    $partial   = 0
+    $none      = 0
+    $gaps      = New-Object System.Collections.Generic.List[string]
+
+    foreach ($name in $features.Keys) {
+        $needApp = @($features[$name].Application)
+        $needDel = @($features[$name].Delegated)
+
+        $missing = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $needApp) { if ($effectiveApp -notcontains $p) { $missing.Add($p) } }
+        foreach ($p in $needDel) { if ($effectiveDel -notcontains $p) { $missing.Add("$p (delegated)") } }
+
+        $needCount = $needApp.Count + $needDel.Count
+        $haveCount = $needCount - $missing.Count
+
+        if ($missing.Count -eq 0)      { $status = 'Available';     $color = 'Green';    $available++ }
+        elseif ($haveCount -gt 0)      { $status = 'Partial';       $color = 'Yellow';   $partial++ }
+        else                           { $status = 'Not available'; $color = 'DarkGray'; $none++ }
+
+        # Keep the table readable; the full list goes in the gap summary below.
+        $missingText = ''
+        if ($missing.Count -gt 0) {
+            $missingText = ($missing | Select-Object -First 2) -join ', '
+            if ($missing.Count -gt 2) { $missingText += " (+$($missing.Count - 2) more)" }
+            foreach ($m in $missing) { if ($gaps -notcontains $m) { $gaps.Add($m) } }
+        }
+
+        Write-Host ("    {0,-52} {1,-14} {2}" -f $name, $status, $missingText) -ForegroundColor $color
+    }
+
+    Write-Host ""
+    Write-Host ("    {0} available, {1} partial, {2} not available" -f $available, $partial, $none) -ForegroundColor White
+
+    # --- Requested but not consented ----------------------------------------
+    # The quiet failure mode: the portal shows the permission, the product still fails.
+    if ($useConsent) {
+        $pendingApp = @($ps.RequestedApp | Where-Object { $ps.ConsentedApp -notcontains $_ })
+        $pendingDel = @($ps.RequestedDel | Where-Object { $ps.ConsentedDel -notcontains $_ })
+
+        if ($pendingApp.Count -gt 0 -or $pendingDel.Count -gt 0) {
+            Write-Host ""
+            Write-Warn "These permissions are requested on the app but NOT consented:"
+            $pendingApp | ForEach-Object { Write-Host "             $_" -ForegroundColor Yellow }
+            $pendingDel | ForEach-Object { Write-Host "             $_ (delegated)" -ForegroundColor Yellow }
+            Write-Host "           Grant admin consent in the portal:" -ForegroundColor Gray
+            Write-Host "             App registrations > API permissions > Grant admin consent" -ForegroundColor Gray
+        }
+    }
+
+    # --- What to add to close the gaps --------------------------------------
+    if ($gaps.Count -gt 0) {
+        Write-Host ""
+        Write-Host "    To enable the features above, add these Graph permissions:" -ForegroundColor White
+        $gaps | Sort-Object | ForEach-Object { Write-Host "      - $_" -ForegroundColor Gray }
+        Write-Host ""
+        Write-Host "    App registrations > $($ps.DisplayName) > API permissions >" -ForegroundColor Gray
+        Write-Host "    Add a permission > Microsoft Graph, then Grant admin consent." -ForegroundColor Gray
+    }
+
+    # --- Permissions present but unused by this product ---------------------
+    $catalogPerms = New-Object System.Collections.Generic.List[string]
+    foreach ($f in $features.Keys) {
+        foreach ($p in $features[$f].Application) { if ($catalogPerms -notcontains $p) { $catalogPerms.Add($p) } }
+        foreach ($p in $features[$f].Delegated)   { if ($catalogPerms -notcontains $p) { $catalogPerms.Add($p) } }
+    }
+    $extra = @($effectiveApp + $effectiveDel | Where-Object { $catalogPerms -notcontains $_ } | Select-Object -Unique)
+
+    if ($extra.Count -gt 0) {
+        Write-Host ""
+        Write-Host "    Also present, not used by any $Product feature:" -ForegroundColor DarkGray
+        $extra | Sort-Object | ForEach-Object { Write-Host "      - $_" -ForegroundColor DarkGray }
+        Write-Host "    These may belong to another product or a custom integration." -ForegroundColor DarkGray
+    }
+
+    if ($ps.UnknownIds.Count -gt 0) {
+        Write-Host ""
+        Write-Warn "$($ps.UnknownIds.Count) permission ID(s) could not be resolved to a name."
+        Write-Host "           They may be from a non-Graph API or a preview permission." -ForegroundColor Gray
+    }
+
+    Write-Host ""
+
+    return [pscustomobject]@{
+        Available = $available
+        Partial   = $partial
+        None      = $none
+        Gaps      = @($gaps)
+    }
+}
+
+function Get-ExistingAppRegistration {
+    <#
+        Confirms the app registration exists and reports what it is, so a mistyped GUID
+        is caught here rather than becoming a service connection that authenticates
+        against nothing.
+
+        Connects with a read-only scope. This mode never modifies the app registration.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$AppId,
+        [string]$TenantId,
+        [switch]$ReuseExisting,
+        [switch]$UseDeviceCode
+    )
+
+    Write-Step "Validating the existing app registration"
+
+    # Read-only scopes. Application.Read.All covers the app registration, its service
+    # principal, and appRoleAssignments. DelegatedPermissionGrant.Read.All is needed
+    # separately to read oauth2PermissionGrants for the consent report - if it is not
+    # granted, the report degrades to "requested only" rather than failing.
+    $ctx = Connect-GraphForced -Scopes @('Application.Read.All', 'DelegatedPermissionGrant.Read.All') `
+                               -TenantId $TenantId `
+                               -ReuseExisting:$ReuseExisting -UseDeviceCode:$UseDeviceCode
+
+    Write-Ok "Signed in as $($ctx.Account)"
+    Write-Host "           Tenant : $($ctx.TenantId)" -ForegroundColor Gray
+
+    $app = Get-MgApplication -Filter "appId eq '$AppId'" -ErrorAction SilentlyContinue |
+           Select-Object -First 1
+
+    if (-not $app) {
+        Write-Err "No app registration with Application (client) ID '$AppId' exists in this tenant."
+        Write-Host "           Check the GUID, and that you signed in to the right tenant." -ForegroundColor Gray
+        throw "App registration not found."
+    }
+
+    Write-Ok "Found: $($app.DisplayName)"
+    Write-Host "           Object ID : $($app.Id)" -ForegroundColor DarkGray
+
+    # Report what is already on the app so the operator can sanity-check it is the right
+    # one before wiring it into a product.
+    $graphAccess = @($app.RequiredResourceAccess | Where-Object { $_.ResourceAppId -eq $GraphAppId })
+    if ($graphAccess -and $graphAccess[0].ResourceAccess) {
+        $roles  = @($graphAccess[0].ResourceAccess | Where-Object { $_.Type -eq 'Role'  }).Count
+        $scopes = @($graphAccess[0].ResourceAccess | Where-Object { $_.Type -eq 'Scope' }).Count
+        Write-Host "           Graph permissions : $roles application, $scopes delegated" -ForegroundColor DarkGray
+    }
+    else {
+        Write-Warn "This app registration has no Microsoft Graph permissions assigned."
+        Write-Host "           Configuration will still proceed, but the product will not be able" -ForegroundColor Gray
+        Write-Host "           to do anything until permissions are added and consented." -ForegroundColor Gray
+    }
+
+    return [pscustomobject]@{
+        AppId       = $app.AppId
+        ObjectId    = $app.Id
+        DisplayName = $app.DisplayName
+        TenantId    = $ctx.TenantId
+    }
+}
+
+function Invoke-ExistingAppConfiguration {
+    <#
+    .SYNOPSIS
+        Configures a product against an app registration that already exists, skipping
+        creation and consent entirely.
+
+    .DESCRIPTION
+        Re-running configuration against an app registration created earlier is a normal
+        onboarding situation - the app exists, but the RMS service connection or the
+        Application Workspace identity source still needs to be created.
+
+        Reads the script-level parameters directly, the same way the main Execute block
+        does, rather than taking a fifteen-parameter signature.
+
+        Nothing in this path writes to the app registration. It only reads it (to confirm
+        it exists) and then configures the consuming product.
+    #>
+    [CmdletBinding()]
+    param()
+
+    Write-Host ""
+    Write-Host "  Existing app registration mode" -ForegroundColor White
+    Write-Host "  ------------------------------" -ForegroundColor DarkGray
+    Write-Host "  No app registration will be created, modified, or consented." -ForegroundColor Gray
+
+    # --- Guard: contradictory switches --------------------------------------
+    if ($CreateClientSecret) {
+        throw "-CreateClientSecret cannot be used with -ExistingAppId. This mode never modifies the app registration; supply the existing secret value when prompted."
+    }
+
+    # --- Guard: the app id has to look like a GUID --------------------------
+    $parsed = [guid]::Empty
+    if (-not [guid]::TryParse($ExistingAppId, [ref]$parsed)) {
+        throw "-ExistingAppId '$ExistingAppId' is not a valid GUID. Use the Application (client) ID from the app registration Overview page."
+    }
+    $appId = $parsed.ToString()
+
+    # --- Which product? ------------------------------------------------------
+    # Inferred from the -Configure* switch when only one was given, because asking again
+    # would be redundant.
+    if ($ConfigureServiceConnection -and -not $ConfigureIdentitySource) {
+        $product = 'Right Click Tools'
+    }
+    elseif ($ConfigureIdentitySource -and -not $ConfigureServiceConnection) {
+        $product = 'Application Workspace'
+    }
+    else {
+        if ($ConfigureServiceConnection -and $ConfigureIdentitySource) {
+            Write-Warn "Both -ConfigureServiceConnection and -ConfigureIdentitySource were given."
+            Write-Host "           This mode configures one product per run." -ForegroundColor Gray
+        }
+        $product = Select-Product
+    }
+
+    Write-Ok "Target product : $product"
+
+    # --- Confirm the app exists ---------------------------------------------
+    $tenantId = $TenantId
+
+    if ($SkipAppValidation) {
+        # -WhatIfOnly in this mode IS the permission report, and the report needs the
+        # Graph lookup that -SkipAppValidation suppresses. Combining them would otherwise
+        # fall through and configure the product, which is the opposite of -WhatIfOnly.
+        if ($WhatIfOnly) {
+            throw "-WhatIfOnly cannot be combined with -SkipAppValidation. The coverage report requires reading the app registration from Microsoft Graph."
+        }
+
+        Write-Step "Skipping app registration validation (-SkipAppValidation)"
+        Write-Warn "The app registration will not be checked before configuring the product."
+        Write-Host "           The feature coverage report is also skipped." -ForegroundColor Gray
+
+        if (-not $tenantId) {
+            do {
+                $tenantId = (Read-Host "    Directory (tenant) ID").Trim()
+                $tGuid = [guid]::Empty
+                if ($tenantId -and -not [guid]::TryParse($tenantId, [ref]$tGuid)) {
+                    Write-Warn "That is not a valid GUID."
+                    $tenantId = $null
+                }
+            } until ($tenantId)
+        }
+
+        $appDisplay = '(not validated)'
+    }
+    else {
+        $existing = Get-ExistingAppRegistration -AppId $appId -TenantId $tenantId `
+                        -ReuseExisting:$ReuseGraphSession -UseDeviceCode:$UseDeviceCode
+
+        $appId      = $existing.AppId
+        $tenantId   = $existing.TenantId
+        $appDisplay = $existing.DisplayName
+
+        # --- Feature coverage report ----------------------------------------
+        # Reads the permissions actually on the app and maps them back onto the feature
+        # catalog, so the admin can see what will work before configuring anything - and
+        # exactly which permission to add if something is missing.
+        try {
+            $graphSp = Get-MgServicePrincipal -Filter "appId eq '$GraphAppId'" -ErrorAction Stop
+            if ($graphSp) {
+                $permState = Get-AppRegistrationPermissionState -AppId $appId -GraphSp $graphSp
+                $coverage  = Show-FeatureCoverageReport -PermissionState $permState -Product $product
+
+                if ($coverage.None -gt 0 -and $coverage.Available -eq 0) {
+                    Write-Warn "No $product feature is fully supported by this app registration."
+                }
+            }
+        }
+        catch {
+            Write-Warn "Could not build the feature coverage report: $($_.Exception.Message)"
+            Write-Host "           Configuration can still proceed." -ForegroundColor Gray
+        }
+
+        # -WhatIfOnly turns this mode into a read-only audit: report and stop.
+        if ($WhatIfOnly) {
+            Write-Warn "-WhatIfOnly specified. Nothing was configured."
+            return
+        }
+
+        if (-not $Force) {
+            if ((Read-Host "`n    Configure $product using this app registration? (Y/n)") -match '^[Nn]') {
+                throw "Cancelled - wrong app registration."
+            }
+        }
+    }
+
+    # --- Secret --------------------------------------------------------------
+    $secretValue = Read-ClientSecretValue
+
+    # --- Configure -----------------------------------------------------------
+    if ($product -eq 'Right Click Tools') {
+
+        $rmsServer = $RmsServer
+        $rmsPort   = $RmsPort
+        $selfSigned = $AllowSelfSignedCertificate
+
+        if (-not $rmsServer) {
+            do {
+                $rmsServer = (Read-Host "    RMS server (e.g. rms.contoso.com)").Trim()
+            } until ($rmsServer)
+
+            $portIn = (Read-Host "    RMS port [$rmsPort]").Trim()
+            if ($portIn -match '^\d+$') { $rmsPort = [int]$portIn }
+        }
+
+        if (-not $selfSigned -and -not $Force) {
+            $selfSigned = (Read-Host "    Allow a self-signed RMS certificate? (y/N)") -match '^[Yy]'
+        }
+
+        $connName = (Read-Host "    Service connection name [Entra ID]").Trim()
+        if (-not $connName) { $connName = 'Entra ID' }
+
+        Add-RmsAzureAdServiceConnection -Server $rmsServer -Port $rmsPort `
+            -Name $connName `
+            -TenantId $tenantId -ClientId $appId -ClientSecret $secretValue `
+            -AllowSelfSignedCertificate:$selfSigned `
+            -TestAfterCreate | Out-Null
+    }
+    else {
+        # The identity source settings normally come from the feature catalog. There is no
+        # catalog selection in this mode, so ask directly - or take the switches as given
+        # when -Force signals an unattended run.
+        $wantPhotos     = [bool]$EnableAzurePhotos
+        $wantGroupWrite = [bool]$EnableGroupWrite
+        $wantMail       = [bool]$ConfigureMailServer
+
+        if (-not $Force) {
+            Write-Host ""
+            Write-Host "    These map to permissions the app registration may already hold." -ForegroundColor Gray
+            Write-Host "    Enable only what it was actually granted." -ForegroundColor Gray
+
+            $defPhotos = if ($wantPhotos)     { 'Y/n' } else { 'y/N' }
+            $defGroup  = if ($wantGroupWrite) { 'Y/n' } else { 'y/N' }
+            $defMail   = if ($wantMail)       { 'Y/n' } else { 'y/N' }
+
+            $ansPhotos = (Read-Host "    Sync user profile photos?            ($defPhotos)").Trim()
+            if ($ansPhotos) { $wantPhotos = $ansPhotos -match '^[Yy]' }
+
+            $ansGroup = (Read-Host "    Allow group editing from Workspace?  ($defGroup)").Trim()
+            if ($ansGroup) { $wantGroupWrite = $ansGroup -match '^[Yy]' }
+
+            $ansMail = (Read-Host "    Create a Microsoft Graph mail server? ($defMail)").Trim()
+            if ($ansMail) { $wantMail = $ansMail -match '^[Yy]' }
+        }
+
+        New-AwEntraIdentitySource -TenantId $tenantId `
+            -ClientId $appId -ClientSecret $secretValue `
+            -Name $IdentitySourceName -DisplayName $IdentitySourceDisplayName `
+            -ZoneUri $ZoneUrl -ZoneCredential $ZoneCredential `
+            -ModulePath $AwModulePath `
+            -EnablePhotos $wantPhotos -EnableGroupWrite $wantGroupWrite
+
+        # Kept separate so a mail server failure does not obscure a successful identity
+        # source, and vice versa.
+        if ($wantMail) {
+            try {
+                New-AwGraphMailServer -TenantId $tenantId `
+                    -ClientId $appId -ClientSecret $secretValue `
+                    -Name $MailServerName -From $MailServerFrom | Out-Null
+            }
+            catch {
+                Write-Err "Mail server creation failed: $($_.Exception.Message)"
+                Write-Warn "Add it manually: Manage > Mail Servers > Create > Microsoft Graph"
+            }
+        }
+    }
+
+    # --- Summary -------------------------------------------------------------
+    Write-Host ""
+    Write-Host "  ===========================================================" -ForegroundColor Green
+    Write-Host "   Configuration complete" -ForegroundColor Green
+    Write-Host "  ===========================================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "   Product                  : $product"
+    Write-Host "   App registration         : $appDisplay"
+    Write-Host "   Application (client) ID  : $appId"
+    Write-Host "   Directory (tenant) ID    : $tenantId"
+    Write-Host ""
+    Write-Host "   The app registration itself was not modified." -ForegroundColor Gray
+    Write-Host ""
+}
+
+#endregion
+
 #region ------------------------------------------------------------- Execute
 
 try {
@@ -2946,6 +3550,14 @@ try {
     Write-Host "  -------------------------------------" -ForegroundColor DarkGray
 
     Test-Prerequisites
+
+    # --- Existing app registration mode -------------------------------------
+    # Skips creation, permissions, and consent entirely and goes straight to configuring
+    # the consuming product. Returns before any of the creation flow below runs.
+    if ($ExistingAppId) {
+        Invoke-ExistingAppConfiguration
+        return
+    }
 
     $product  = Select-Product
     $features = Select-Features -Product $product
@@ -3045,7 +3657,7 @@ try {
     # --- Public client platform (Right Click Tools) --------------------------
     #
     # The WAM broker redirect URI and "Allow public client flows" only matter for
-    # DELEGATED sign-in, where the tool acts as the signed-in admin and needs an
+    # delegated sign-in, where the tool acts as the signed-in admin and needs an
     # interactive token from the Windows token broker.
     #
     # Application-permission tools (client ID + secret, no user) never use a redirect
@@ -3136,8 +3748,8 @@ try {
     }
     if ($secretValue) {
         Write-Host ""
-        Write-Host "   Client secret VALUE      : $secretValue" -ForegroundColor Yellow
-        Write-Host "   ^ This is the VALUE, not the Secret ID. It is shown once." -ForegroundColor Yellow
+        Write-Host "   Client secret value      : $secretValue" -ForegroundColor Yellow
+        Write-Host "   ^ This is the secret value, not the Secret ID. It is shown once." -ForegroundColor Yellow
         Write-Host "     Copy it into your password vault now." -ForegroundColor Yellow
         Write-Host ""
         Write-Host "   Secret expires           : $($secretExpiry.ToString('yyyy-MM-dd'))" -ForegroundColor Yellow
@@ -3163,7 +3775,7 @@ try {
             Write-Host "   Next step: add the Identity Source in Application Workspace" -ForegroundColor Cyan
             Write-Host "     Manage > Identity Sources > Create > Microsoft Entra ID" -ForegroundColor Gray
             Write-Host "     You will need the Application (client) ID, Directory (tenant) ID," -ForegroundColor Gray
-            Write-Host "     and a Client Secret VALUE." -ForegroundColor Gray
+            Write-Host "     and a client secret value." -ForegroundColor Gray
             Write-Host ""
         }
         else {
@@ -3208,10 +3820,8 @@ try {
             catch {
                 Write-Err "RMS service connection failed: $($_.Exception.Message)"
 
-                # Bare .Exception.Message is not enough for .NET binding errors like
-                # "Argument types do not match" - it names no line and no type. Dump the
-                # exception type, the failing line, and the script stack so the next
-                # failure is diagnosable in one run instead of three.
+                # .Exception.Message alone names no line and no type, which is not enough
+                # to diagnose a .NET binding error. Dump the type, failing line, and stack.
                 Write-Host ""
                 Write-Host "    --- error detail ---------------------------------------" -ForegroundColor DarkGray
                 Write-Host "     Type       : $($_.Exception.GetType().FullName)" -ForegroundColor DarkGray
@@ -3269,7 +3879,7 @@ try {
                 Write-Host "           Manage > Identity Sources > Create > Microsoft Entra ID" -ForegroundColor Gray
             }
 
-            # Mail.Send was granted, so stand up the Graph mail server too. Kept separate
+            # Mail.Send was granted, so create the Graph mail server too. Kept separate
             # from the identity source: a mail server failure should not obscure a
             # successful identity source, and vice versa.
             if ($wantMail) {
@@ -3313,7 +3923,7 @@ try {
             "Delegated permissions:"
             ($permSet.Delegated | ForEach-Object { "  - $_" })
             ""
-            "NOTE: The client secret VALUE is intentionally NOT written to this file."
+            "Note: the client secret value is intentionally not written to this file."
             "      Store it in your password vault."
         )
         $lines | Out-File -FilePath $outFile -Encoding UTF8
@@ -3333,9 +3943,8 @@ catch {
     }
     Write-Host "           Type      : $($_.Exception.GetType().FullName)" -ForegroundColor DarkGray
 
-    # Do NOT call `exit` here. Under some hosts - and when the script is launched via
-    # right-click > Run with PowerShell - `exit` terminates the WINDOW, taking the error
-    # message with it before it can be read. Set the exit code and return instead.
+    # Avoid `exit` here. Under some hosts - including right-click > Run with PowerShell -
+    # it closes the window before the error can be read. Set the exit code and return.
     $global:LASTEXITCODE = 1
     return
 }
