@@ -14,11 +14,11 @@ Built to replace the manual click-through in the Recast onboarding guides.
 4. **Signs you in** to Microsoft Graph, prompting every run so the target tenant is always explicit.
 5. **Creates the app registration**, service principal, platform configuration, and optionally a client secret.
 6. **Grants tenant-wide admin consent** for every permission it added.
-7. **Optionally configures the product** — an RMS service connection for Right Click Tools, or an identity source and Graph mail server for Application Workspace.
+7. **Optionally configures the product** — an RMS service connection for Right Click Tools, or an identity source and Graph mail server for Application Workspace. Both paths verify the result and offer a guided retry or cleanup if something is wrong, rather than just reporting success.
 
 Permission GUIDs are resolved **live** from the Microsoft Graph service principal in the target tenant. Nothing is hardcoded, so nothing drifts when Microsoft changes an ID. If a permission name cannot be resolved, the script aborts before writing anything.
 
-Already have an app registration? See [Existing app registration mode](#existing-app-registration-mode) to skip straight to step 7, or to audit which product features an existing app can actually support.
+Already have an app registration? See [Existing app registration mode](#-existing-app-registration-mode) to skip straight to step 7, or to audit which product features an existing app can actually support.
 
 ---
 
@@ -109,11 +109,13 @@ Application Workspace registrations also get a Web redirect URI built from your 
 
 Sources:\
 [How to Setup Microsoft Entra App Registration to use as an Application Workspace Identity Source](https://scribehow.com/o/xf43_qHmRXqaTl4dNDHGFA/viewer/How_to_Setup_Microsoft_Entra_App_Registration_to_use_as_an_Application_Workspace_Identity_Source__UmRbqg_rSqORT_QX2UTqZQ)\
-[Configure Single Sign-On with Microsoft Entra ID](https://docs.recastsoftware.com/help/lws-login-single-sign-on-sso-with-azure)
+[Configure Single Sign-On with Microsoft Entra ID](https://docs.recastsoftware.com/help/lws-login-single-sign-on-sso-with-azure-active-directory)
+
+---
 
 ## 🔍 Existing app registration mode
 
-Use `-ExistingAppId` when the app registration already exists and only the product-side configuration is missing — a common situation when the app was created weeks earlier, or created by someone else.
+Use `-ExistingAppId` when the app registration already exists and only the product-side configuration is missing — a common situation when the app was created weeks earlier, created by someone else, or **owned by a different team than the one running this script** (see [Segregated ownership](#segregated-ownership--restricted-accounts) below).
 
 ```powershell
 # RMS service connection against an existing app
@@ -196,6 +198,20 @@ The report also lists any permissions present that no feature of the selected pr
 
 If consent status cannot be read (for example your account lacks `DelegatedPermissionGrant.Read.All`), the report falls back to requested permissions and says so rather than implying more certainty than it has. An app registration with no service principal at all is flagged explicitly, since it cannot hold any grant.
 
+#### Segregated ownership / restricted accounts
+
+A common real-world scenario: the app registration was created by one team (or one tenant admin), and the person running this script to configure RMS or Application Workspace has only the client ID, tenant ID, and a client secret — **not** rights to read the app registration itself in Entra.
+
+The script is designed to degrade gracefully in every one of these cases rather than stop:
+
+| What fails | What happens |
+|---|---|
+| Graph sign-in itself fails (no rights in the tenant at all) | Warns, prompts for the Directory (tenant) ID if not supplied with `-TenantId`, and continues using the supplied values. |
+| Sign-in succeeds, but reading the app registration returns Access Denied / 403 | Warns that permissions and feature coverage cannot be verified, and continues using the supplied App ID. |
+| The app registration is not returned by Graph (wrong ID, wrong tenant, or no read rights) | Warns with the possible causes, and continues rather than assuming the ID is wrong. |
+
+In every case above, configuration still proceeds using the App ID, tenant ID, and secret you supplied — it just cannot show you the feature coverage report, since that report requires reading the app's actual permission grants. If you want to skip the sign-in attempt entirely (for example, you already know the account has no rights), use `-SkipAppValidation` instead of waiting for it to fail.
+
 #### Audit only
 
 Combine `-ExistingAppId` with `-WhatIfOnly` to run the report and stop — no secret prompt, nothing configured:
@@ -204,7 +220,7 @@ Combine `-ExistingAppId` with `-WhatIfOnly` to run the report and stop — no se
 .\New-RecastEntraAppRegistration.ps1 -ExistingAppId '<app-id>' -WhatIfOnly
 ```
 
-This is the fastest way to answer "what can this app registration actually do?" for an app someone else created.
+This is the fastest way to answer "what can this app registration actually do?" for an app someone else created. If the account cannot read the app (see above), the report cannot run, and the script says so rather than returning an empty or misleading result.
 
 #### Skipping validation
 
@@ -232,14 +248,52 @@ Enable only what the app registration was actually granted. For unattended runs,
 
 Creates the `AzureActiveDirectory` service connection in Recast Management Server:
 
-1. Calls `ListProxies` and displays the proxy grid
-2. You pick the proxy that will use the connection
-3. Submits `CreateAzureActiveDirectoryServiceConnection` with the proxy's certificate thumbprint
+1. Connects to RMS and calls `ListProxies`, displaying the proxy grid.
+2. You pick the proxy that will use the connection (its certificate thumbprint protects the client secret).
+3. **Checks for a duplicate** — a connection already pointed at the *same tenant and same client ID* — before creating anything.
+4. Validates the credentials against RMS, then creates (or updates) the connection and tests it.
 
 ```powershell
 .\New-RecastEntraAppRegistration.ps1 -CreateClientSecret `
     -ConfigureServiceConnection -RmsServer rms.contoso.com -AllowSelfSignedCertificate
 ```
+
+Connections are created **Confirmed** by default — pass `-MarkConfirmed:$false` to leave one unconfirmed.
+
+#### Duplicate detection
+
+RMS does not upsert on create — submitting the same tenant/client twice creates a **second row**, not an update to the first. The script checks for an existing connection matching the *same tenant and same client ID* (matching on tenant alone would be a false positive: one tenant can legitimately hold several connections against different app registrations, e.g. one per product). If a match is found, you are asked:
+
+```
+    (U)pdate the existing connection, (C)reate a new one anyway, or (Q)uit? [U/c/q]
+```
+
+Update is the default and the confirmed-working path for correcting a connection's client ID, secret, or proxy in place.
+
+#### Retry and cleanup on a failed credential test
+
+After creating or updating the connection, the script tests it. If the test fails (most commonly a pasted Secret ID instead of the Secret value, or an expired secret), the script:
+
+1. Identifies whether the failure is one that re-entering the secret could plausibly fix (a bad or expired secret, wrong tenant/client) versus one it can't (missing admin consent).
+2. If retryable, offers to re-enter the client secret and try again — up to 3 attempts, applied via an in-place **update** to the same connection rather than creating another row.
+3. If you decline to retry, the failure isn't retryable, or attempts are exhausted, offers to **delete** the unconfirmed connection rather than leave a known-broken row sitting in Service Connections indefinitely.
+
+```
+    [FAIL] Synchronization failed: ... AADSTS7000215: Invalid client secret provided...
+    [WARN] The secret VALUE was rejected - likely the Secret ID was entered instead.
+    Re-enter the client secret and try again? (Y/n):
+```
+
+#### A note on test results
+
+RMS's own **Audit Log** (Administration → Audit Log) is the confirmed, reliable source of truth for whether a credential test passed or failed. The synchronous HTTP response body for the test actions has not been reliably confirmed to carry an accurate signal in every case, so the script treats a test call that did not throw an exception as **"submitted for validation,"** not as a confirmed pass — and points you at the Audit Log to check the real result:
+
+```
+    [ OK ] Credentials submitted for validation
+           Confirm the result in RMS: Administration > Audit Log
+```
+
+A confirmed **failure** (the credentials were rejected outright, surfaced as a thrown error) is always trustworthy and drives the retry/cleanup flow above.
 
 ### Application Workspace → identity source + mail server
 
@@ -262,6 +316,32 @@ $cred = Get-Credential   # local\admin
 ```
 
 If the identity source already exists it is **not** recreated — recreating one breaks sign-in for users who previously authenticated through it.
+
+#### Sync verification, retry, and cleanup
+
+Creating the identity source only *stores* configuration — Application Workspace does not actually present the client secret to Entra until it **synchronizes**. The script triggers that sync immediately afterward and classifies the result into one of three outcomes, bounded by a short timeout so a slow-but-legitimate sync does not block the rest of the run:
+
+- **Confirmed success** — the sync task reports a `Success` state. The script prints `[ OK ] Identity source '<name>' synchronized successfully.` and moves on immediately; nothing further is required.
+- **Confirmed failure** (bad secret, wrong tenant) — these have been observed to surface quickly. The script offers to re-enter the secret and retry, up to 3 attempts, correcting the same identity source in place rather than creating a duplicate. If you decline, the failure isn't retryable (e.g. missing admin consent), or attempts run out, it offers to **delete the identity source** rather than leave a broken one in the UI.
+- **Unresolved when the timeout is hit** — treated as "probably a normal sync still running in the background," *not* a failure. The script does **not** retry or prompt in this case; it logs a note and moves on. A Microsoft Graph mail server (if selected) is still created in this case — only a *confirmed* sync failure blocks it.
+
+```
+==> Synchronizing identity source 'CO' (attempt 1 of 3, up to 20 sec)
+    [ OK ] Identity source 'CO' synchronized successfully.
+```
+
+If the secret is wrong, you'll instead see the sync fail with the real Entra error, followed by a chance to correct it in place:
+
+```
+==> Synchronizing identity source 'CX' (attempt 1 of 3, up to 20 sec)
+    [FAIL] Synchronization failed: ... AADSTS7000215: Invalid client secret provided...
+    [WARN] The secret VALUE was rejected - likely the Secret ID was entered instead.
+    Re-enter the client secret and try again? (Y/n): y
+    [ OK ] Client secret updated on 'CX'.
+
+==> Synchronizing identity source 'CX' (attempt 2 of 3, up to 20 sec)
+    [ OK ] Identity source 'CX' synchronized successfully.
+```
 
 ---
 
@@ -295,7 +375,7 @@ If the identity source already exists it is **not** recreated — recreating one
 |---|---|
 | `-UseDeviceCode` | Bypass the Windows WAM broker and sign in with a device code. |
 | `-ReuseGraphSession` | Accept an existing Graph session instead of forcing a fresh sign-in. |
-| `-Force` | Skip confirmation prompts. In `-ExistingAppId` mode, also takes the AW setting switches as given rather than asking. |
+| `-Force` | Skip confirmation prompts. In `-ExistingAppId` mode, also takes the AW setting switches as given rather than asking, and suppresses the interactive retry/cleanup prompts on RMS and Application Workspace failures in favor of automatic behavior. |
 
 ### Module handling
 
@@ -343,6 +423,10 @@ Two versions of the Graph SDK are visible to .NET in the same session. Close **a
 
 In `-ExistingAppId` mode, either the GUID is wrong or you signed in to a different tenant. Confirm the **Application (client) ID** on the app registration Overview page — not the Object ID or the Directory (tenant) ID — and check the tenant reported at sign-in.
 
+### The feature coverage report did not run / "permissions cannot be verified"
+
+The signed-in account does not have rights to read the app registration in Entra — a normal situation when the app was created by a different team than the one running this script. Configuration still proceeds using the App ID, tenant ID, and secret you supply; only the report is skipped. See [Segregated ownership / restricted accounts](#segregated-ownership--restricted-accounts).
+
 ### `LiquitContext — No connection is available to service this operation`
 
 The Application Workspace module is loaded but not connected to a zone. The script detects this and stops rather than reporting false success. Supply `-ZoneCredential`, or connect first with `Connect-LiquitWorkspace`.
@@ -363,6 +447,18 @@ The `Proxy*Field` names in `$RmsApiContract` do not match your RMS version. The 
 Get-RmsRawResponse -Server <rms> -Endpoint 'Administration/ListProxies' -AllowSelfSignedCertificate
 ```
 
+### RMS reports "Credentials submitted for validation" instead of a clear pass/fail
+
+This is expected. RMS's synchronous test response has not been reliably confirmed to carry an accurate pass/fail signal in every case, so the script reports the call as submitted rather than guessing. Check **Administration → Audit Log** in RMS for the authoritative result. A confirmed failure (the call throwing an error) is always trusted and will trigger the retry/cleanup flow automatically.
+
+### The Application Workspace zone connection fails with a credential error
+
+If the zone username or password is wrong, the script now retries automatically — up to 3 attempts — rather than failing the whole run on the first typo. If it still fails after 3 attempts, double-check the account has `zone.access.api` permission and that the zone URI is correct; those are not fixable by re-entering the same password.
+
+### An RMS service connection or AW identity source keeps failing and I want to start clean
+
+Let the script's retry flow run its course — after 3 attempts, or if the failure is non-retryable (e.g. missing admin consent), it offers to delete the connection or identity source it created. Accept that offer, fix the underlying issue (grant consent, correct the secret in your vault), then re-run.
+
 ### Module installs silently do nothing
 
 Usually PowerShellGet 1.0.0.1, the stock version on Windows PowerShell 5.1, which reports provider failures as non-terminating errors. The script detects this and offers to bootstrap 2.2.5. Accept, then **close and reopen PowerShell** — the old version stays loaded in the current session.
@@ -372,8 +468,12 @@ Usually PowerShellGet 1.0.0.1, the stock version on Windows PowerShell 5.1, whic
 ## Notes on behaviour
 
 - **The client secret is shown once** and is deliberately excluded from the optional summary file. Copy it into a password vault immediately.
-- **Every write is verified.** The script never treats the absence of an exception as evidence of success — it reads objects back after creating them.
+- **Every write is verified.** The script never treats the absence of an exception as evidence of success — it reads objects back after creating them, and destructive actions (delete) are verified by re-querying afterward rather than trusting the action's own reported result.
 - **Sign-in prompts every run** by default. A cached MSAL token would otherwise silently reuse whichever account authenticated last, which is how an app registration ends up in the wrong tenant.
+- **Validation failures degrade gracefully, not fatally.** If the account running the script cannot read the app registration in Entra — a normal situation across segregated teams — configuration still proceeds with the values you supplied; only the verification report is skipped.
+- **Failed connections and identity sources are not silently left behind.** When a credential test fails and cannot be corrected in the current run, the script offers to remove what it created rather than leave a known-broken configuration in place.
+- **Application Workspace sync results are classified into exactly three outcomes** — confirmed success, confirmed failure, or unresolved/still-running — with no default fallthrough between them, so a successful sync is always reported as success rather than mistaken for a failure.
+- **Zone connection retries on a bad password**, the same way RMS and Entra secret failures do, rather than failing the whole run on a single typo.
 - **PSGallery trust is restored** to its original value on exit if the script temporarily changed it.
 
 ---
