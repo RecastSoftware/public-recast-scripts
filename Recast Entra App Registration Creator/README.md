@@ -27,7 +27,7 @@ Already have an app registration? See [Existing app registration mode](#-existin
 | | |
 |---|---|
 | **PowerShell** | 5.1 or later (Windows PowerShell or PowerShell 7) |
-| **Modules** | `Microsoft.Graph.Authentication`, `Microsoft.Graph.Applications` — installed automatically if missing |
+| **Modules** | `Microsoft.Graph.Authentication`, `Microsoft.Graph.Applications` — installed automatically when Microsoft Graph access is required. Not required when using `-ExistingAppId` together with `-SkipAppValidation`. |
 | **Entra roles** | Application Administrator to create the app; Privileged Role Administrator or Global Administrator to grant consent |
 | **For RMS config** | A deployed Recast Proxy, and RMS permissions on your account |
 | **For AW config** | A zone API account. The Application Workspace PowerShell module is resolved automatically — see below. |
@@ -67,7 +67,26 @@ Install-Module -Name Liquit.Server.PowerShell -Scope CurrentUser
 .\New-RecastEntraAppRegistration.ps1 -UseDeviceCode
 
 # Audit an app registration that already exists — what can it actually do?
-.\New-RecastEntraAppRegistration.ps1 -ExistingAppId '<app-id>' -WhatIfOnly
+.\New-RecastEntraAppRegistration.ps1 -ExistingAppId '' -WhatIfOnly
+
+# Configure an existing RMS service connection without loading Graph modules
+.\New-RecastEntraAppRegistration.ps1 `
+    -ExistingAppId '' `
+    -TenantId '' `
+    -SkipAppValidation `
+    -ConfigureServiceConnection `
+    -RmsServer rms.contoso.com `
+    -AllowSelfSignedCertificate
+
+# Configure an existing Application Workspace identity source without Graph modules
+.\New-RecastEntraAppRegistration.ps1 `
+    -ExistingAppId '' `
+    -TenantId '' `
+    -SkipAppValidation `
+    -ConfigureIdentitySource `
+    -ZoneUrl 'https://contoso.recastsoftware.cloud' `
+    -IdentitySourceName 'EntraID' `
+    -IdentitySourceDisplayName 'Recast Software'
 ```
 
 ---
@@ -108,7 +127,7 @@ Application Workspace registrations also get a Web redirect URI built from your 
 > `User.Read` delegated is added explicitly. The Azure **portal** adds it automatically to every new app registration — which is why it appears in the onboarding guide screenshots as "Microsoft Graph (5)" — but the Graph **API** does not. Without it, SSO sign-in is missing its baseline scope.
 
 Sources:\
-[How to Setup Microsoft Entra App Registration to use as an Application Workspace Identity Source](https://scribehow.com/o/xf43_qHmRXqaTl4dNDHGFA/viewer/How_to_Setup_Microsoft_Entra_App_Registration_to_use_as_an_Application_Workspace_Identity_Source__UmRbqg_rSqORT_QX2UTqZQ)\
+[How to Setup Microsoft Entra App Registration to use as an Application Workspace Identity Source](https://scribehow.com/o/xf43\_qHmRXqaTl4dNDHGFA/viewer/How\_to\_Setup\_Microsoft\_Entra\_App\_Registration\_to\_use\_as\_an\_Application\_Workspace\_Identity\_Source\_\_UmRbqg\_rSqORT\_QX2UTqZQ)\
 [Configure Single Sign-On with Microsoft Entra ID](https://docs.recastsoftware.com/help/lws-login-single-sign-on-sso-with-azure-active-directory)
 
 ---
@@ -119,11 +138,11 @@ Use `-ExistingAppId` when the app registration already exists and only the produ
 
 ```powershell
 # RMS service connection against an existing app
-.\New-RecastEntraAppRegistration.ps1 -ExistingAppId '<app-id>' `
+.\New-RecastEntraAppRegistration.ps1 -ExistingAppId '' `
     -ConfigureServiceConnection -RmsServer rms.contoso.com -AllowSelfSignedCertificate
 
 # Application Workspace identity source against an existing app
-.\New-RecastEntraAppRegistration.ps1 -ExistingAppId '<app-id>' `
+.\New-RecastEntraAppRegistration.ps1 -ExistingAppId '' `
     -ConfigureIdentitySource -ZoneUrl 'https://contoso.recastsoftware.cloud' `
     -IdentitySourceName 'EntraID' -IdentitySourceDisplayName 'Recast Software'
 ```
@@ -217,14 +236,39 @@ In every case above, configuration still proceeds using the App ID, tenant ID, a
 Combine `-ExistingAppId` with `-WhatIfOnly` to run the report and stop — no secret prompt, nothing configured:
 
 ```powershell
-.\New-RecastEntraAppRegistration.ps1 -ExistingAppId '<app-id>' -WhatIfOnly
+.\New-RecastEntraAppRegistration.ps1 -ExistingAppId '' -WhatIfOnly
 ```
 
 This is the fastest way to answer "what can this app registration actually do?" for an app someone else created. If the account cannot read the app (see above), the report cannot run, and the script says so rather than returning an empty or misleading result.
 
-#### Skipping validation
+#### Skipping validation and Graph module checks
 
-Pass `-SkipAppValidation` to avoid the sign-in entirely. You will be prompted for the tenant ID instead, or supply it with `-TenantId`. The coverage report is skipped too, since it depends on the same Graph lookup — so `-SkipAppValidation` cannot be combined with `-WhatIfOnly`.
+Pass `-SkipAppValidation` together with `-ExistingAppId` to enter **configuration-only mode**.
+
+In this mode the script:
+
+- Does **not** install or import Microsoft Graph modules.
+- Does **not** clean or align Graph SDK versions.
+- Does **not** connect to Microsoft Graph.
+- Does **not** validate the app registration.
+- Does **not** build the feature coverage report.
+- Does **not** modify the app registration or grant consent.
+
+Instead, the script goes directly to configuring RMS or Application Workspace using the supplied:
+
+- Application (client) ID
+- Directory (tenant) ID
+- Client secret value
+
+This mode is intended for implementation teams that have been provided credentials but do not have permission to read or manage the Entra application itself.
+
+For RMS, no Microsoft Graph or Application Workspace module is required.
+
+For Application Workspace, only `Liquit.Server.PowerShell` is required.
+
+You will be prompted for the Directory (tenant) ID if `-TenantId` is omitted.
+
+`-SkipAppValidation` cannot be combined with `-WhatIfOnly`, because the feature coverage report requires Microsoft Graph.
 
 ### Application Workspace settings
 
@@ -364,7 +408,7 @@ If the secret is wrong, you'll instead see the sync fail with the real Entra err
 | Parameter | Description |
 |---|---|
 | `-ExistingAppId` | Application (client) ID of an existing app. Skips creation, permissions, and consent. Cannot be used with `-CreateClientSecret`. |
-| `-SkipAppValidation` | Skip the read-only Graph lookup that confirms the app exists. Avoids a sign-in; prompts for the tenant ID instead. Also skips the coverage report, so it cannot be combined with `-WhatIfOnly`. |
+| `-SkipAppValidation` | When combined with `-ExistingAppId`, activates configuration-only mode. Skips Graph module installation/import, Graph sign-in, app validation, and the feature coverage report. Prompts for the tenant ID if it is not supplied. Cannot be combined with `-WhatIfOnly`. |
 | `-EnableAzurePhotos` | Set `AzurePhotos` on the identity source. Prompted for unless `-Force`. |
 | `-EnableGroupWrite` | Set `AzureWriteMode` to `GroupMembership`. Prompted for unless `-Force`. |
 | `-ConfigureMailServer` | Also create the Graph mail server. Prompted for unless `-Force`. |
@@ -444,7 +488,7 @@ The installed gallery module version does not expose the cmdlets this script exp
 The `Proxy*Field` names in `$RmsApiContract` do not match your RMS version. The script dumps the actual property names it found. Capture the real shape with:
 
 ```powershell
-Get-RmsRawResponse -Server <rms> -Endpoint 'Administration/ListProxies' -AllowSelfSignedCertificate
+Get-RmsRawResponse -Server  -Endpoint 'Administration/ListProxies' -AllowSelfSignedCertificate
 ```
 
 ### RMS reports "Credentials submitted for validation" instead of a clear pass/fail
@@ -458,6 +502,29 @@ If the zone username or password is wrong, the script now retries automatically 
 ### An RMS service connection or AW identity source keeps failing and I want to start clean
 
 Let the script's retry flow run its course — after 3 attempts, or if the failure is non-retryable (e.g. missing admin consent), it offers to delete the connection or identity source it created. Accept that offer, fix the underlying issue (grant consent, correct the secret in your vault), then re-run.
+
+### Graph modules are still being requested in configuration-only mode
+
+Configuration-only mode is activated only when **both** of the following are supplied:
+
+```powershell
+-ExistingAppId ''
+-SkipAppValidation
+```
+
+Example:
+
+```powershell
+.\New-RecastEntraAppRegistration.ps1 `
+    -ExistingAppId '' `
+    -TenantId '' `
+    -SkipAppValidation `
+    -ConfigureIdentitySource
+```
+
+Application Workspace configuration-only mode may still install or import `Liquit.Server.PowerShell`, but it should not install or import Microsoft Graph modules.
+
+RMS configuration-only mode should not require either Microsoft Graph or Application Workspace modules.
 
 ### Module installs silently do nothing
 
@@ -474,6 +541,5 @@ Usually PowerShellGet 1.0.0.1, the stock version on Windows PowerShell 5.1, whic
 - **Failed connections and identity sources are not silently left behind.** When a credential test fails and cannot be corrected in the current run, the script offers to remove what it created rather than leave a known-broken configuration in place.
 - **Application Workspace sync results are classified into exactly three outcomes** — confirmed success, confirmed failure, or unresolved/still-running — with no default fallthrough between them, so a successful sync is always reported as success rather than mistaken for a failure.
 - **Zone connection retries on a bad password**, the same way RMS and Entra secret failures do, rather than failing the whole run on a single typo.
+- **Configuration-only mode skips Microsoft Graph prerequisites entirely.** Use `-ExistingAppId` together with `-SkipAppValidation` to configure RMS or Application Workspace without installing, importing, or using the Microsoft Graph SDK.
 - **PSGallery trust is restored** to its original value on exit if the script temporarily changed it.
-
----
