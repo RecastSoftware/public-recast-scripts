@@ -1184,7 +1184,38 @@ function Resolve-TargetModuleVersion {
     Write-Ok "All modules aligned to $target"
     return $target
 }
-function Test-Prerequisites {
+function Test-CorePrerequisites {
+    <#
+        Prerequisites that apply to every execution mode.
+
+        Configuration-only mode does not read or modify Microsoft Entra through Graph,
+        so it should not require, install, clean, align, or import any Microsoft.Graph
+        modules. Product-specific prerequisites are handled later by the RMS or
+        Application Workspace configuration path.
+    #>
+    [CmdletBinding()]
+    param()
+
+    Write-Step "Checking configuration-only prerequisites"
+
+    if ($PSVersionTable.PSVersion -lt [version]'5.1') {
+        throw "PowerShell 5.1 or later is required. Detected $($PSVersionTable.PSVersion)."
+    }
+
+    Write-Ok "PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
+
+    if ($script:ModuleScope -eq 'AllUsers' -and -not (Test-IsElevated)) {
+        Write-Warn "AllUsers scope needs an elevated session. Falling back to CurrentUser."
+        $script:ModuleScope = 'CurrentUser'
+    }
+
+    Test-HostIsolation
+    Repair-PSModulePath
+
+    Write-Ok "Microsoft Graph prerequisites skipped"
+    Write-Host "           Configuration-only mode does not access Microsoft Graph." -ForegroundColor Gray
+}
+function Test-GraphPrerequisites {
     Write-Step "Checking prerequisites"
     # --- PowerShell version -------------------------------------------------
     if ($PSVersionTable.PSVersion -lt [version]'5.1') {
@@ -3475,6 +3506,11 @@ function Invoke-ExistingAppConfiguration {
     Write-Host "  Existing app registration mode" -ForegroundColor White
     Write-Host "  ------------------------------" -ForegroundColor DarkGray
     Write-Host "  No app registration will be created, modified, or consented." -ForegroundColor Gray
+    if ($SkipAppValidation) {
+        Write-Host "  Microsoft Graph is not required or loaded in this mode." -ForegroundColor Gray
+        Write-Host "  The supplied app ID, tenant ID, and secret will be validated only by" -ForegroundColor Gray
+        Write-Host "  the selected Recast product." -ForegroundColor Gray
+    }
     # --- Guard: contradictory switches --------------------------------------
     if ($CreateClientSecret) {
         throw "-CreateClientSecret cannot be used with -ExistingAppId. This mode never modifies the app registration; supply the existing secret value when prompted."
@@ -3485,6 +3521,14 @@ function Invoke-ExistingAppConfiguration {
         throw "-ExistingAppId '$ExistingAppId' is not a valid GUID. Use the Application (client) ID from the app registration Overview page."
     }
     $appId = $parsed.ToString()
+    if ($SkipAppValidation) {
+        $tenantId = Resolve-TenantIdFallback -TenantId $TenantId
+
+        $tenantGuid = [guid]::Empty
+        if (-not [guid]::TryParse($tenantId, [ref]$tenantGuid)) {
+            throw "The Directory (tenant) ID '$tenantId' is not a valid GUID."
+        }
+    }
     # --- Which product? ------------------------------------------------------
     # Inferred from the -Configure* switch when only one was given, because asking again
     # would be redundant.
@@ -3967,10 +4011,29 @@ try {
     Write-Host ""
     Write-Host "  Recast Entra App Registration Builder" -ForegroundColor White
     Write-Host "  -------------------------------------" -ForegroundColor DarkGray
-    Test-Prerequisites
+
+    # Configuration-only mode:
+    #   - an existing app registration is supplied
+    #   - Graph validation is explicitly skipped
+    #
+    # In this mode the script does not create, read, modify, or consent anything through
+    # Microsoft Graph. It only configures RMS or Application Workspace using the tenant,
+    # client ID, and client secret supplied by the operator.
+    $configurationOnly = $ExistingAppId -and $SkipAppValidation
+
+    if ($configurationOnly) {
+        Write-Host ""
+        Write-Host "  Configuration-only mode" -ForegroundColor White
+        Write-Host "  -----------------------" -ForegroundColor DarkGray
+        Write-Host "  Microsoft Graph modules will not be installed, loaded, cleaned, or validated." -ForegroundColor Gray
+
+        Test-CorePrerequisites
+    }
+    else {
+        Test-GraphPrerequisites
+    }
+
     # --- Existing app registration mode -------------------------------------
-    # Skips creation, permissions, and consent entirely and goes straight to configuring
-    # the consuming product. Returns before any of the creation flow below runs.
     if ($ExistingAppId) {
         Invoke-ExistingAppConfiguration
         return
