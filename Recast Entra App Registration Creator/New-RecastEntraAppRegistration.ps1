@@ -1468,19 +1468,40 @@ function Grant-AdminConsent {
     elseif ($Resolved.Scopes.Count -gt 0) {
         $scopeString = ($Resolved.Scopes.Name | Sort-Object) -join ' '
         try {
-            # Only one grant per resource is allowed, so merge into an existing one.
+            # A service principal can hold MULTIPLE grants per resource: one tenant-wide
+            # grant (consentType = AllPrincipals) plus one per user who self-consented at
+            # sign-in (consentType = Principal). Filtering on clientId + resourceId alone
+            # can return a user's personal grant first - patching that would merge these
+            # scopes into one user's consent while the tenant-wide grant never receives
+            # them, and this function would still report success.
+            #
+            # consentType is filtered client-side rather than in the OData filter: if that
+            # property is not filterable on a given tenant's API version, the resulting 400
+            # would be swallowed by the catch below, leaving $existingGrant null and sending
+            # the code down the POST path - where it would then collide with the grant that
+            # already exists.
             $existingGrant = $null
             try {
                 $filter = "clientId eq '$($AppServicePrincipal.Id)' and resourceId eq '$($GraphSp.Id)'"
-                $existingGrant = (Invoke-MgGraphRequest -Method GET `
+                $allGrants = (Invoke-MgGraphRequest -Method GET `
                     -Uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=$filter" `
                     -ErrorAction Stop).value
+
+                $existingGrant = @($allGrants | Where-Object { $_.consentType -eq 'AllPrincipals' }) |
+                                 Select-Object -First 1
             } catch { }
+
             if ($existingGrant) {
-                $merged = (($existingGrant[0].scope -split ' ') + $Resolved.Scopes.Name |
+                # Re-confirm before writing. A PATCH against a Principal grant modifies a
+                # single user's consent, not the tenant-wide grant.
+                if ($existingGrant.consentType -ne 'AllPrincipals') {
+                    throw "Refusing to update grant $($existingGrant.id): consentType is '$($existingGrant.consentType)', not 'AllPrincipals'."
+                }
+
+                $merged = (($existingGrant.scope -split ' ') + $Resolved.Scopes.Name |
                            Where-Object { $_ } | Select-Object -Unique | Sort-Object) -join ' '
                 Invoke-MgGraphRequest -Method PATCH `
-                    -Uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($existingGrant[0].id)" `
+                    -Uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($existingGrant.id)" `
                     -Body @{ scope = $merged } -ErrorAction Stop | Out-Null
                 $granted = $merged
             }
