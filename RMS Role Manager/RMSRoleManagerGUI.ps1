@@ -11,10 +11,11 @@ CORE FUNCTIONALITY
 - Checks role membership before deletion.
 - Displays the active RMS URL, connected identity, and detected RMS version in the footer.
 - Retrieves Builder Actions and available permissions dynamically from RMS.
-- Filters tools using GetAllPermissions and validated minimum-version requirements.
+- Filters individual permissions using GetAllPermissions and validated minimum-version requirements, so a tool is hidden only when none of its permissions are available.
 - Supports testing across multiple RMS environments through an optional Switch RMS workflow.
-- SWITCH RMS is hidden by default and is enabled by setting:
+- SWITCH RMS is hidden by default and can be enabled persistently by setting:
   $script:EnableRmsSwitch = $true
+- SWITCH RMS can also be revealed for the current session only by pressing F9. This does not persist across restarts.
 
 ROLE CREATION AND PERMISSION MANAGEMENT
 - Organizes permissions by recognizable Right Click Tools categories and menu structure.
@@ -24,9 +25,15 @@ ROLE CREATION AND PERMISSION MANAGEMENT
 - Prevents duplicate role names.
 - Displays progress while permissions are applied.
 - Supports a configurable wizard background.
-- Includes Device Management, Client Actions, Client Tools, Console Tools, Security Tools, Remote Tools, User Management, Application Management, Content Distribution, Console Dashboards, and Builder Actions.
+- Includes Device Management, Client Actions, Client Tools, Console Tools, Security Tools, Remote Tools, User Management, Application Management, Content Distribution, Console Dashboards, Privileged Access, and Builder Actions.
+- Nests Privileged Access into two subcategories: Right Click Tools (ConfigMgr console extension) and Recast Management Server (RMS web portal).
+- Splits the Recast Management Server surface into three tiers: View and Retrieve (operator), Modify Configuration (administrator), and Read Reports (historical activation code and password-retrieval reporting).
+- Shares RMS console-shell permissions (GetAllSettings, GetGlobalConfigurationIssues) across all three Recast Management Server tiers so each renders without portal configuration errors when held independently.
+- Renders Privileged Access last in both Create Role and Edit Role so standard categories stay on top.
+- Allows an explicit full-to-unchecked removal to proceed even when the permission is also held by an untouched partially granted tool.
+- Warns in both Preview Changes and Save Changes when a removal affects permissions shared with a partially granted tool.
 - Uses a combined effective map containing static definitions and dynamic Builder Actions.
-- Excludes tools when required permissions are unavailable or the detected RMS version is below the validated minimum version.
+- Excludes only the specific permissions that are unavailable in GetAllPermissions or below the validated minimum version, rather than excluding an entire friendly tool when any one of its permissions is unavailable.
 - Exports role definitions and the local permission map to CSV.
 
 DYNAMIC BUILDER ACTIONS
@@ -36,6 +43,8 @@ DYNAMIC BUILDER ACTIONS
 - Preserves exact RMS permission values, including unique identifiers.
 - Adds discovered Builder Actions to Create Role and Edit Role.
 - Refreshes Builder Actions when either role wizard opens.
+- Appends RunSavedAction to every Builder Action so the saved action window is accessible.
+- Verifies RunSavedAction exists in GetAllPermissions before appending it, so older servers are not filtered out.
 - Continues with static permissions if dynamic discovery fails.
 
 ROLE EDITING AND MAINTENANCE
@@ -128,8 +137,9 @@ SWITCH RMS TESTING MODE
 - Preserves the selected authentication method.
 - Restores the previous RMS environment if the switch fails.
 - Is hidden and disabled by default for normal deployments.
-- Enable by setting:
+- Enable persistently by setting:
   $script:EnableRmsSwitch = $true
+- Enable for the current session only by pressing F9. The control returns to hidden on the next launch regardless of whether F9 was used previously.
 
 USER INTERFACE AND SAFETY
 - Uses compact, screen-constrained WPF windows.
@@ -146,16 +156,14 @@ USER INTERFACE AND SAFETY
 IMPLEMENTATION NOTES
 - UpdateUserRolesAndScopes replaces a principal's complete role set. Existing role records and scope filters must be included in every update.
 - Newly assigned roles receive the default unrestricted filter unless additional scoping is configured.
-- GetAllPermissions is used for permission discovery but may expose permissions before the related tool is available.
-- Validated minimum-version requirements are therefore applied at the friendly-tool level.
+- GetAllPermissions is used for permission discovery. A permission absent from a given server's catalog, or below its own validated minimum version, is excluded individually rather than excluding the entire friendly tool.
+- A friendly tool is hidden only when none of its permissions remain available after per-permission filtering; it otherwise renders with whichever permissions are supported on the connected server.
 - Unknown version requirements remain available rather than being blocked automatically.
 - Unmanaged and unavailable permissions are preserved during role editing.
 - Batch principal deletion performs one DeleteUser request per principal and can partially succeed.
-- Internal RMS API routes may change in future releases.
 - Changes should be validated with non-production roles and principals before production use.
 
 Author: Chris Antoku
-Updated: Added version-aware permission filtering, dynamic Builder Actions, safe in-place role editing, progress-enabled cloning and importing, user and group management, role membership management, connected identity display, and optional multi-environment RMS switching.
 #>
 # ---------------------------- C# Class for TreeView Logic ----------------------------
 $cSharpSource = @"
@@ -166,38 +174,81 @@ using System.ComponentModel;
 public class RmsTreeItem : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler PropertyChanged;
-    private bool _isChecked;
-    
+    private bool? _isChecked = false;
+    private bool _isUpdatingChildren = false;
+
     public string Name { get; set; }
-    public string Category { get; set; }      
-    public string PluginName { get; set; }    
-    public string PermissionName { get; set; } 
+    public string Category { get; set; }
+    public string PluginName { get; set; }
+    public string PermissionName { get; set; }
+    public RmsTreeItem Parent { get; set; }
     public ObservableCollection<RmsTreeItem> Children { get; set; }
 
     public RmsTreeItem()
     {
         Children = new ObservableCollection<RmsTreeItem>();
-    }
-
-    public bool IsChecked
-    {
-        get { return _isChecked; }
-        set
+        // Auto-wire Parent whenever a child is added - no PowerShell
+        // tree-building code needs to change for this to work.
+        Children.CollectionChanged += (s, e) =>
         {
-            if (_isChecked != value)
+            if (e.NewItems != null)
             {
-                _isChecked = value;
-                OnPropertyChanged("IsChecked");
-
-                if (Children != null)
+                foreach (RmsTreeItem child in e.NewItems)
                 {
-                    foreach (var child in Children)
-                    {
-                        child.IsChecked = value;
-                    }
+                    child.Parent = this;
                 }
             }
+        };
+    }
+
+    public bool? IsChecked
+    {
+        get { return _isChecked; }
+        set { SetIsChecked(value, true, true); }
+    }
+
+    private void SetIsChecked(bool? value, bool updateChildren, bool updateParent)
+    {
+        if (_isChecked == value) { return; }
+
+        _isChecked = value;
+
+        // Cascade DOWN only when explicitly set to true/false (never
+        // cascade a null/indeterminate value onto children).
+        if (updateChildren && _isChecked.HasValue && Children != null)
+        {
+            _isUpdatingChildren = true;
+            foreach (var child in Children)
+            {
+                child.SetIsChecked(_isChecked, true, false);
+            }
+            _isUpdatingChildren = false;
         }
+
+        // Bubble UP so every ancestor recomputes its own state.
+        if (updateParent && Parent != null && !Parent._isUpdatingChildren)
+        {
+            Parent.RecalculateFromChildren();
+        }
+
+        OnPropertyChanged("IsChecked");
+    }
+
+    private void RecalculateFromChildren()
+    {
+        if (Children == null || Children.Count == 0) { return; }
+
+        bool allChecked = true;
+        bool allUnchecked = true;
+
+        foreach (var child in Children)
+        {
+            if (child.IsChecked != true) { allChecked = false; }
+            if (child.IsChecked != false) { allUnchecked = false; }
+        }
+
+        bool? newState = allChecked ? true : (allUnchecked ? false : (bool?)null);
+        SetIsChecked(newState, false, true);
     }
 
     protected void OnPropertyChanged(string name)
@@ -276,7 +327,6 @@ $Global:RmsToolMap = @(
 
     [pscustomobject]@{ Cat="Client Tools"; Name="Remote Software Center"; Plugin="ConfigMgrClient"; Action="GetDeployedPrograms" },
     [pscustomobject]@{ Cat="Client Tools"; Name="Remote Software Center"; Plugin="ConfigMgrServer"; Action="InstallApplication" },
-    [pscustomobject]@{ Cat="Client Tools"; Name="Remote Software Center"; Plugin="Administration"; Action="GetAllSettings" },
     [pscustomobject]@{ Cat="Client Tools"; Name="Remote Software Center"; Plugin="WMI"; Action="ReadOnly" },
     [pscustomobject]@{ Cat="Client Tools"; Name="Remote Software Center"; Plugin="ConfigMgrClient"; Action="GetDeployedTaskSequences" },
     [pscustomobject]@{ Cat="Client Tools"; Name="Remote Software Center"; Plugin="ConfigMgrClient"; Action="InstallUserApplication" },
@@ -503,6 +553,187 @@ $Global:RmsToolMap = @(
     # 10. Set LAPS Password Expiration
     [pscustomobject]@{ Cat="Security Tools"; Name="Set LAPS Password Expiration"; Plugin="ActiveDirectory"; Action="SetLapsPasswordExpiration" },
 
+    # ========================== PRIVILEGED ACCESS ==========================
+    # Two distinct surfaces, nested under one root so the tree makes the
+    # difference explicit:
+    #
+    #   Privileged Access
+    #   |- Right Click Tools          -> ConfigMgr console extension actions
+    #   |- Recast Management Server   -> RMS web portal actions
+    #
+    # An operator can hold one surface without the other. Both require
+    # Privileged Access licensing and a registered Privilege Manager agent.
+    #
+    # IMPORTANT OVERLAP NOTE:
+    # The RMS "View and Retrieve" tier is a strict superset of both Right
+    # Click Tools entries below. That is not a mapping error - the same RMS
+    # permissions genuinely back both surfaces. The Edit Role diff logic
+    # warns when a removal also touches a partially granted tool.
+
+    # ---------------- Right Click Tools ----------------
+    # Captured from the RMS Audit Log while running each tool from the
+    # ConfigMgr console Privileged Access submenu.
+
+    # Generate Activation Code
+    # Issues a time-limited activation code that elevates the end user.
+    # GetPmAgent resolves the agent record. ReadAgentClientSettings and
+    # ReadAgentTemporaryAccounts are read-only prerequisites.
+    # CreateActivationCode performs the elevation.
+    #
+    # NOTE: the RMS Audit Log displays this action as CreateActivationCodeV3.
+    #       That is a logging defect. The permission RMS actually evaluates
+    #       is CreateActivationCode, confirmed against the role permission
+    #       list in the RMS Permissions interface.
+    [pscustomobject]@{ Cat="Right Click Tools"; Name="Generate Activation Code"; Plugin="PrivilegeManager"; Action="GetPmAgent" },
+    [pscustomobject]@{ Cat="Right Click Tools"; Name="Generate Activation Code"; Plugin="PrivilegeManager"; Action="ReadAgentClientSettings" },
+    [pscustomobject]@{ Cat="Right Click Tools"; Name="Generate Activation Code"; Plugin="PrivilegeManager"; Action="ReadAgentTemporaryAccounts" },
+    [pscustomobject]@{ Cat="Right Click Tools"; Name="Generate Activation Code"; Plugin="PrivilegeManager"; Action="CreateActivationCode" },
+
+    # Retrieve Local Account Password
+    # Reveals the managed local account password for a device.
+    #
+    # UpdateRetrievedPassword is a WRITE. The tool marks the password as
+    # retrieved, which is what drives rotation. Without it the read succeeds
+    # but the retrieval is never recorded.
+    [pscustomobject]@{ Cat="Right Click Tools"; Name="Retrieve Local Account Password"; Plugin="PrivilegeManager"; Action="GetPmAgent" },
+    [pscustomobject]@{ Cat="Right Click Tools"; Name="Retrieve Local Account Password"; Plugin="PrivilegeManager"; Action="ReadAgentRandomPasswordAccounts" },
+    [pscustomobject]@{ Cat="Right Click Tools"; Name="Retrieve Local Account Password"; Plugin="PrivilegeManager"; Action="ReadRetrievedPassword" },
+    [pscustomobject]@{ Cat="Right Click Tools"; Name="Retrieve Local Account Password"; Plugin="PrivilegeManager"; Action="UpdateRetrievedPassword" },
+
+    # ---------------- Recast Management Server ----------------
+    # Access to the Privileged Access section of the RMS web portal.
+    #
+    # VIEW AND RETRIEVE is the operator tier. It reaches the Agents page,
+    # opens agent detail, and pulls codes and passwords.
+    #
+    # MODIFY CONFIGURATION is the administrator tier. It covers targets,
+    # target groups, user rules, group rules, self-service rules, local
+    # accounts, global settings, and the setup wizard flag.
+    #
+    # READ REPORTS is a reporting tier. It covers historical activation
+    # code and password-retrieval reporting, with no agent-level access.
+
+    # View and Retrieve (operator tier) - 19 permissions
+    # CONFIRMED against a working test role.
+    #
+    # Agents page and agent resolution.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgents" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="SearchAgents" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="GetPmAgent" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgentClientSettings" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadConfiguration" },
+    #
+    # RMS console shell. Required to render any portal page, not exclusive
+    # to Privileged Access. Without these the portal throws configuration
+    # errors. CONFIRMED present in a working operator role.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="Administration"; Action="GetAllSettings" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="Administration"; Action="GetGlobalConfigurationIssues" },
+    #
+    # Agent detail tabs. These are agent-scoped reads surfaced when an
+    # operator opens a single agent.
+    #
+    # PENDING VERIFICATION: the four Read*Agent* rule/account reads below are
+    # inferred from their agent-scoped naming, not captured from the Audit
+    # Log. Open an agent in the portal and confirm which tabs render. If a
+    # tab is absent, move that permission to Modify Configuration.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgentActivationCodes" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgentTemporaryAccounts" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgentRandomPasswordAccounts" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgentRetrievedPasswords" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgentGroupRules" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgentUserRules" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgentLocalUsers" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadAgentLocalGroups" },
+    #
+    # Operator actions.
+    # UpdateRetrievedPassword is a WRITE that records the retrieval and
+    # drives rotation. RefreshSettings is new as of 5.12.2607.2401.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="CreateActivationCode" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="ReadRetrievedPassword" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="UpdateRetrievedPassword" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="View and Retrieve"; Plugin="PrivilegeManager"; Action="RefreshSettings" },
+    #
+    # REMOVED after testing: ReadActivationCodes and ReadRetrievedPasswords
+    # were inferred as non-agent-scoped reporting views. They do NOT appear
+    # in a working operator role. If a Privileged Access reporting surface
+    # is mapped later, they belong there - not in this tier.
+
+    # Modify Configuration (administrator tier) - 36 permissions
+    #
+    # Global settings. ReadConfiguration is shared with View and Retrieve,
+    # which is correct - a setting cannot be changed without first being read.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadConfiguration" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="UpdateConfiguration" },
+    #
+    # RMS console shell. Shared with View and Retrieve. An administrator
+    # holding only this tier still needs the portal to render without
+    # configuration errors.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="Administration"; Action="GetAllSettings" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="Administration"; Action="GetGlobalConfigurationIssues" },
+    #
+    # Targets.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadTarget" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadTargets" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="CreateTarget" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="UpdateTarget" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="DeleteTarget" },
+    #
+    # Target groups.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadTargetGroup" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadTargetGroups" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadTargetGroupTargets" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="CreateTargetGroup" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="UpdateTargetGroup" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="DeleteTargetGroup" },
+    #
+    # User rules.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadUserRule" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadUserRules" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="CreateUserRule" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="UpdateUserRule" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="DeleteUserRule" },
+    #
+    # Group rules.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadGroupRule" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadGroupRules" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="CreateGroupRule" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="UpdateGroupRule" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="DeleteGroupRule" },
+    #
+    # Self-service rules.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadSelfServiceRule" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadSelfServiceRules" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="CreateSelfServiceRule" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="UpdateSelfServiceRule" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="DeleteSelfServiceRule" },
+    #
+    # Local accounts.
+    # NOTE: the plugin exposes no Update or Delete counterparts for local
+    #       users and groups. That asymmetry is in the product, not this map.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadLocalUsers" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="CreateLocalUser" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadLocalGroup" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="ReadLocalGroups" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="CreateLocalGroup" },
+    #
+    # Setup wizard. There is no portal mechanism to re-run configuration -
+    # this is a database flag - so it belongs with the administrator tier.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Modify Configuration"; Plugin="PrivilegeManager"; Action="RunSetupWizard" },
+    #
+    # Read Reports (reporting tier) - 5 permissions
+    # Read-only historical reporting on activation codes and password
+    # retrieval events, with no agent browse access.
+    #
+    # RMS console shell. Shared with View and Retrieve and Modify
+    # Configuration - same portal-render prerequisite in all three tiers.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Read Reports"; Plugin="Administration"; Action="GetAllSettings" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Read Reports"; Plugin="Administration"; Action="GetGlobalConfigurationIssues" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Read Reports"; Plugin="PrivilegeManager"; Action="ReadConfiguration" },
+    #
+    # The actual reporting permissions. Previously unmapped - these showed
+    # as "Unknown" category in List Role Permissions until this tier existed.
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Read Reports"; Plugin="PrivilegeManager"; Action="ReadActivationCodes" },
+    [pscustomobject]@{ Cat="Recast Management Server"; Name="Read Reports"; Plugin="PrivilegeManager"; Action="ReadRetrievedPasswords" },
     # ========================== REMOTE TOOLS (RCT 5.12.2607+) ==========================
     # Enterprise licensing only (excludes Legacy). Best experience over the Recast Agent.
     #
@@ -1051,7 +1282,14 @@ $Global:RmsToolMinimumVersionCatalog = @{
         Notes           = 'Add Devices to an Entra Group'
     }
 }
-
+$Global:RmsPermissionMinimumVersionCatalog = @{
+    'privilegemanager|refreshsettings' = @{
+        MinimumVersion = '5.12.2607.2401'
+        SourceType     = 'Minimum Right Click Tools Version'
+        Source         = 'Confirmed against RMS Audit Log and release notes'
+        Notes          = 'Privileged Access - Refresh Agent Settings'
+    }
+}
 # ---------------------------- Early Helper Functions ----------------------------
 function To-TrimmedString {
     param([Parameter(ValueFromPipeline)][object]$Value)
@@ -1179,7 +1417,9 @@ function Stop-MainProgress {
 # and enable the SWITCH RMS button in the upper-right corner.
 $script:EnableRmsSwitch = $false
 
-$DefaultRMS = "https://cs-rms.cs.recastsoftware.com:444"
+# Shown as the pre-filled example in the startup prompt. Replace with your own
+# Recast Management Server URL, or just type over it when the dialog appears.
+$DefaultRMS = "https://your-rms-server.contoso.com:444"
 $InputRMS   = Show-InputDialog -Title "RMS Configuration" -Prompt "Enter Recast Management Server URL:" -Default $DefaultRMS
 
 if ([string]::IsNullOrWhiteSpace($InputRMS)) { return }
@@ -1421,6 +1661,60 @@ function Show-CreateRoleDialog {
         $treeItems.Add($dmRoot)
     }
 
+    # -------------------- Privileged Access root --------------------
+    # Nested like Device Management so the surface is explicit in the tree.
+    # The node is BUILT here but ADDED after the standard categories so it
+    # renders at the bottom of the list.
+
+    $paSubCats = @(
+        "Right Click Tools",
+        "Recast Management Server"
+    )
+
+    $paRoot = New-Object RmsTreeItem
+    $paRoot.Name = "Privileged Access"
+    $paRoot.Category = "Privileged Access"
+
+    foreach ($subCatName in $paSubCats) {
+        $itemsInCategory = @(
+            $effectiveMap |
+                Where-Object {
+                    $_.Cat -eq $subCatName
+                }
+        )
+
+        if ($itemsInCategory.Count -eq 0) {
+            continue
+        }
+
+        $subCatNode = New-Object RmsTreeItem
+        $subCatNode.Name = $subCatName
+        $subCatNode.Category = "Privileged Access"
+
+        $uniqueActionNames = @(
+            $itemsInCategory |
+                Select-Object -ExpandProperty Name -Unique |
+                Sort-Object
+        )
+
+        foreach ($actionName in $uniqueActionNames) {
+            $child = New-Object RmsTreeItem
+            $child.Name = $actionName
+            $child.Category = $subCatName
+
+            $subCatNode.Children.Add($child)
+        }
+
+        $paRoot.Children.Add($subCatNode)
+    }
+
+    if ($paRoot.Children.Count -gt 0) {
+        Log-Message (
+            "Create Role tree built Privileged Access with " +
+            "$($paRoot.Children.Count) subcategory node(s)."
+        ) "INFO"
+    }
+
     # -------------------- Additional root categories --------------------
 
     $otherCategories = @(
@@ -1475,6 +1769,11 @@ function Show-CreateRoleDialog {
                 "with $($rootNode.Children.Count) tool option(s)."
             ) "INFO"
         }
+    }
+
+    # Privileged Access renders last so the standard categories stay on top.
+    if ($paRoot.Children.Count -gt 0) {
+        $treeItems.Add($paRoot)
     }
 
     $builderTreeNode = @(
@@ -1537,21 +1836,21 @@ function Show-CreateRoleDialog {
 
      <HierarchicalDataTemplate x:Key='RmsLevel3Template'>
         <StackPanel Orientation='Horizontal'>
-            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' VerticalAlignment='Center'/>
+            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' IsThreeState='True' VerticalAlignment='Center'/>
             <TextBlock Text='{Binding Name}' Foreground='White' Margin='5,0,0,0' VerticalAlignment='Center'/>
         </StackPanel>
      </HierarchicalDataTemplate>
 
      <HierarchicalDataTemplate x:Key='RmsLevel2Template' ItemsSource='{Binding Children}' ItemTemplate='{StaticResource RmsLevel3Template}'>
         <StackPanel Orientation='Horizontal'>
-            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' VerticalAlignment='Center'/>
+            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' IsThreeState='True' VerticalAlignment='Center'/>
             <TextBlock Text='{Binding Name}' FontWeight='Bold' Foreground='{StaticResource BrushAccentBlue}' Margin='5,0,0,0' VerticalAlignment='Center'/>
         </StackPanel>
      </HierarchicalDataTemplate>
 
      <HierarchicalDataTemplate x:Key='RmsLevel1Template' ItemsSource='{Binding Children}' ItemTemplate='{StaticResource RmsLevel2Template}'>
         <StackPanel Orientation='Horizontal'>
-            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' VerticalAlignment='Center'/>
+            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' IsThreeState='True' VerticalAlignment='Center'/>
             <TextBlock Text='{Binding Name}' FontSize='14' FontWeight='Bold' Foreground='White' Margin='5,0,0,0' VerticalAlignment='Center'/>
         </StackPanel>
      </HierarchicalDataTemplate>
@@ -1915,6 +2214,51 @@ function Show-EditRoleDialog {
 
     $treeItems.Add($dmRoot)
 
+    # -------------------- Privileged Access root --------------------
+    # Built here, added after the standard categories so it renders last.
+
+    $paSubCats = @(
+        "Right Click Tools",
+        "Recast Management Server"
+    )
+
+    $paRoot = New-Object RmsTreeItem
+    $paRoot.Name = "Privileged Access"
+    $paRoot.Category = "Privileged Access"
+
+    foreach ($subCatName in $paSubCats) {
+        $itemsInCat = @(
+            $Global:RmsEffectiveToolMap |
+                Where-Object {
+                    $_.Cat -eq $subCatName
+                }
+        )
+
+        if ($itemsInCat.Count -eq 0) {
+            continue
+        }
+
+        $subCatNode = New-Object RmsTreeItem
+        $subCatNode.Name = $subCatName
+        $subCatNode.Category = "Privileged Access"
+
+        $uniqueActions = @(
+            $itemsInCat |
+                Select-Object -ExpandProperty Name -Unique |
+                Sort-Object
+        )
+
+        foreach ($actName in $uniqueActions) {
+            $child = New-Object RmsTreeItem
+            $child.Name = $actName
+            $child.Category = $subCatName
+
+            $subCatNode.Children.Add($child)
+        }
+
+        $paRoot.Children.Add($subCatNode)
+    }
+
     $otherCats = @(
         "User Management",
         "Application Management",
@@ -1946,6 +2290,11 @@ function Show-EditRoleDialog {
             $rootNode.Children.Add($child)
         }
         $treeItems.Add($rootNode)
+    }
+
+    # Privileged Access renders last so the standard categories stay on top.
+    if ($paRoot.Children.Count -gt 0) {
+        $treeItems.Add($paRoot)
     }
 
     # ---------- 4. Pre-check existing grants ----------
@@ -2002,19 +2351,19 @@ function Show-EditRoleDialog {
      </Style>
      <HierarchicalDataTemplate x:Key='RmsLevel3Template'>
         <StackPanel Orientation='Horizontal'>
-            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' VerticalAlignment='Center'/>
+            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' IsThreeState='True' VerticalAlignment='Center'/>
             <TextBlock Text='{Binding Name}' Foreground='White' Margin='5,0,0,0' VerticalAlignment='Center'/>
         </StackPanel>
      </HierarchicalDataTemplate>
      <HierarchicalDataTemplate x:Key='RmsLevel2Template' ItemsSource='{Binding Children}' ItemTemplate='{StaticResource RmsLevel3Template}'>
         <StackPanel Orientation='Horizontal'>
-            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' VerticalAlignment='Center'/>
+            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' IsThreeState='True' VerticalAlignment='Center'/>
             <TextBlock Text='{Binding Name}' FontWeight='Bold' Foreground='{StaticResource BrushAccentBlue}' Margin='5,0,0,0' VerticalAlignment='Center'/>
         </StackPanel>
      </HierarchicalDataTemplate>
      <HierarchicalDataTemplate x:Key='RmsLevel1Template' ItemsSource='{Binding Children}' ItemTemplate='{StaticResource RmsLevel2Template}'>
         <StackPanel Orientation='Horizontal'>
-            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' VerticalAlignment='Center'/>
+            <CheckBox IsChecked='{Binding IsChecked, Mode=TwoWay}' IsThreeState='True' VerticalAlignment='Center'/>
             <TextBlock Text='{Binding Name}' FontSize='14' FontWeight='Bold' Foreground='White' Margin='5,0,0,0' VerticalAlignment='Center'/>
         </StackPanel>
      </HierarchicalDataTemplate>
@@ -2204,6 +2553,12 @@ function Show-EditRoleDialog {
             }
         }
 
+        # Permissions that are being removed but ALSO belong to a tool that
+        # was only partially granted when the editor opened. These are still
+        # removed - the explicit uncheck owns the decision - but the operator
+        # is warned because another capability may depend on them.
+        $sharedWithPartialTools = @{}
+
         foreach ($key in $currentSet.Keys) {
             # A selected tool still requires this shared permission.
             if ($desiredSet.ContainsKey($key)) { continue }
@@ -2211,10 +2566,18 @@ function Show-EditRoleDialog {
             # Unmapped permissions are never removed.
             if (-not $managedSet.ContainsKey($key)) { continue }
 
-            # Preserve existing permissions from initially partial tools.
-            if ($protectedPartialPermissionSet.ContainsKey($key)) { continue }
-
-            # No explicit FULL-to-unchecked transition owns this removal.
+            # An explicit FULL -> unchecked transition owns this removal and
+            # takes precedence over passive partial-tool protection.
+            #
+            # $explicitlyRemovableSet only ever contains permissions from
+            # tools that were FULL when the editor opened. A permission
+            # belonging solely to an untouched PARTIAL tool can never appear
+            # here, so partial protection is already implicit in this check.
+            #
+            # Checking partial protection separately was wrong: when one
+            # permission belonged to BOTH a FULL-unchecked tool and an
+            # untouched PARTIAL tool, the passive claim silently blocked the
+            # explicit one and the removal never happened.
             if (-not $explicitlyRemovableSet.ContainsKey($key)) { continue }
 
             $parts = $key -split '\|', 2
@@ -2226,6 +2589,20 @@ function Show-EditRoleDialog {
                     } |
                     Select-Object -First 1
             ) | Select-Object -First 1
+
+            # Record the overlap so the preview and save dialogs can warn.
+            if ($protectedPartialPermissionSet.ContainsKey($key)) {
+                foreach ($toolKey in $initialToolState.Keys) {
+                    $toolState = $initialToolState[$toolKey]
+
+                    if ($toolState.State -ne 'PARTIAL') { continue }
+                    if ($selectedToolSet.ContainsKey($toolKey)) { continue }
+                    if ($toolState.AssignedKeys -notcontains $key) { continue }
+
+                    $label = "$($toolState.Category) / $($toolState.ToolName)"
+                    $sharedWithPartialTools[$label] = $true
+                }
+            }
 
             $toRemove += [pscustomobject]@{
                 Change         = 'REMOVE'
@@ -2264,6 +2641,10 @@ function Show-EditRoleDialog {
             Add     = @($dedupedAdd.Values | Sort-Object PluginName, PermissionName)
             Remove  = @($dedupedRemove.Values | Sort-Object PluginName, PermissionName)
             Desired = @($desired)
+
+            # Friendly tool labels whose remaining permissions are affected
+            # by one or more of the removals above.
+            SharedWithPartial = @($sharedWithPartialTools.Keys | Sort-Object)
         }
     }
 
@@ -2286,6 +2667,22 @@ function Show-EditRoleDialog {
             }
         }
         Show-PermissionsDialog "Pending Changes: $RoleName  (+$($diff.Add.Count) / -$($diff.Remove.Count))" $display
+
+        if ($diff.SharedWithPartial.Count -gt 0) {
+            $warn  = "$($diff.Remove.Count) permission(s) being removed are also used by "
+            $warn += "the following partially granted tool(s):`n`n"
+            $warn += ($diff.SharedWithPartial | ForEach-Object { "  - $_" }) -join "`n"
+            $warn += "`n`nThose tools were not fully granted when this editor opened, "
+            $warn += "so they are not selected above. Removing these permissions may "
+            $warn += "affect capabilities that were configured directly in RMS."
+
+            [System.Windows.MessageBox]::Show(
+                $warn,
+                "Shared Permissions Affected",
+                [System.Windows.MessageBoxButton]::OK,
+                [System.Windows.MessageBoxImage]::Warning
+            ) | Out-Null
+        }
     })
 
         $w.FindName('BtnSave').Add_Click({
@@ -2304,9 +2701,21 @@ function Show-EditRoleDialog {
         if ($unmanagedCount -gt 0) {
             $msg += "`n  $unmanagedCount unmapped permission(s) will be left untouched."
         }
+        if ($diff.SharedWithPartial.Count -gt 0) {
+            $msg += "`n`n  WARNING: some removals are shared with partially granted tool(s):`n"
+            $msg += ($diff.SharedWithPartial | ForEach-Object { "    - $_" }) -join "`n"
+            $msg += "`n  Those capabilities may stop working."
+        }
+
         $msg += "`n`nThe role and its user assignments are NOT deleted."
 
-        $res = [System.Windows.MessageBox]::Show($msg, "Confirm Changes", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+        $icon = if ($diff.SharedWithPartial.Count -gt 0) {
+            [System.Windows.MessageBoxImage]::Warning
+        } else {
+            [System.Windows.MessageBoxImage]::Question
+        }
+
+        $res = [System.Windows.MessageBox]::Show($msg, "Confirm Changes", [System.Windows.MessageBoxButton]::YesNo, $icon)
         if ($res -ne 'Yes') { return }
 
         try {
@@ -4939,7 +5348,88 @@ function Get-RmsToolVersionRequirement {
             $catalogRecord.Notes
     }
 }
+function Get-RmsPermissionVersionRequirement {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Plugin,
 
+        [Parameter(Mandatory)]
+        [string]$Action
+    )
+
+    $key = (
+        "{0}|{1}" -f
+        (To-TrimmedString $Plugin),
+        (To-TrimmedString $Action)
+    ).ToLowerInvariant()
+
+    if (
+        -not $Global:RmsPermissionMinimumVersionCatalog.ContainsKey(
+            $key
+        )
+    ) {
+        return $null
+    }
+
+    $catalogRecord =
+        $Global:RmsPermissionMinimumVersionCatalog[$key]
+
+    $minimumVersion = ConvertTo-RmsVersion `
+        $catalogRecord.MinimumVersion
+
+    if (-not $minimumVersion) {
+        Log-Message (
+            "Invalid minimum version " +
+            "'$($catalogRecord.MinimumVersion)' for " +
+            "permission '$Plugin/$Action'."
+        ) "WARN"
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Key            = $key
+        Plugin         = $Plugin
+        Action         = $Action
+        MinimumVersion = $minimumVersion
+        SourceType     = To-TrimmedString `
+            $catalogRecord.SourceType
+        Source         = To-TrimmedString `
+            $catalogRecord.Source
+        Notes          = To-TrimmedString `
+            $catalogRecord.Notes
+    }
+}
+
+function Test-RmsPermissionVersionSupported {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Plugin,
+
+        [Parameter(Mandatory)]
+        [string]$Action
+    )
+
+    $requirement = Get-RmsPermissionVersionRequirement `
+        -Plugin $Plugin `
+        -Action $Action
+
+    if (-not $requirement) {
+        return $true
+    }
+
+    if (
+        -not $Global:RmsServerVersionLoaded -or
+        -not $Global:RmsServerVersion
+    ) {
+        return $true
+    }
+
+    return (
+        $Global:RmsServerVersion.CompareTo(
+            $requirement.MinimumVersion
+        ) -ge 0
+    )
+}
 function Test-RmsToolVersionSupported {
     param(
         [Parameter(Mandatory)]
@@ -5690,7 +6180,50 @@ function ConvertTo-RmsBuilderActionMap {
         $Permissions = @()
     }
 
-    $builderActions = @()
+    # BuilderAction permissions that are NOT saved actions. These are
+    # infrastructure capabilities that gate the saved-action surface, so they
+    # are appended to every action rather than listed as actions themselves.
+    #
+    # RunSavedAction: without it the action window is inaccessible even when
+    # the specific saved action is granted.
+    $infrastructureNames = @(
+        'RunSavedAction'
+    )
+
+    # ---------- Pass 1: what does THIS server actually expose? ----------
+    # Only append infrastructure that exists in the loaded catalog. Appending
+    # a permission the server does not have would cause
+    # Update-RmsEffectiveToolMap to exclude EVERY Builder Action, because that
+    # filter requires every permission behind a tool to be present.
+    $availableInfrastructure = @()
+
+    foreach ($infraName in $infrastructureNames) {
+        $match = @(
+            $Permissions |
+                Where-Object {
+                    $null -ne $_ -and
+                    (To-TrimmedString $_.PluginName) -ieq 'BuilderAction' -and
+                    (To-TrimmedString $_.PermissionName) -ieq $infraName
+                } |
+                Select-Object -First 1
+        )
+
+        if ($match.Count -gt 0) {
+            $availableInfrastructure += (
+                To-TrimmedString $match[0].PermissionName
+            )
+        }
+        else {
+            Log-Message (
+                "Builder Action infrastructure permission '$infraName' was " +
+                "not returned by GetAllPermissions. Builder Actions will be " +
+                "mapped without it."
+            ) "WARN"
+        }
+    }
+
+    # ---------- Pass 2: collect the real saved actions ----------
+    $savedActions = @()
     $seen = @{}
 
     foreach ($permission in @($Permissions)) {
@@ -5717,6 +6250,12 @@ function ConvertTo-RmsBuilderActionMap {
                 "permission name was empty."
             ) "WARN"
 
+            continue
+        }
+
+        # Infrastructure is appended to every action below, never listed
+        # as an action in its own right.
+        if ($infrastructureNames -icontains $permissionName) {
             continue
         }
 
@@ -5761,21 +6300,53 @@ function ConvertTo-RmsBuilderActionMap {
 
         $seen[$key] = $true
 
+        $savedActions += [pscustomobject]@{
+            FriendlyName   = $friendlyName
+            PermissionName = $permissionName
+            Description    = $description
+            Authorized     = $permission.Authorized
+        }
+    }
+
+    # ---------- Pass 3: emit rows, one per required permission ----------
+    # Dedup is intentionally NOT keyed on plugin|permission here, because
+    # RunSavedAction belongs to EVERY saved action. Keying that way would
+    # drop it after the first action.
+    $builderActions = @()
+
+    foreach ($action in $savedActions) {
+        # The saved action itself.
         $builderActions += [pscustomobject]@{
-            Cat          = 'Builder Actions'
-            Name         = $friendlyName
-            Plugin       = 'BuilderAction'
-            Action       = $permissionName
-            Description  = $description
-            Authorized   = $permission.Authorized
-            IsDynamic    = $true
-            Source       = 'GetAllPermissions'
+            Cat         = 'Builder Actions'
+            Name        = $action.FriendlyName
+            Plugin      = 'BuilderAction'
+            Action      = $action.PermissionName
+            Description = $action.Description
+            Authorized  = $action.Authorized
+            IsDynamic   = $true
+            Source      = 'GetAllPermissions'
+        }
+
+        # Plus every infrastructure prerequisite this server exposes.
+        foreach ($infraName in $availableInfrastructure) {
+            $builderActions += [pscustomobject]@{
+                Cat         = 'Builder Actions'
+                Name        = $action.FriendlyName
+                Plugin      = 'BuilderAction'
+                Action      = $infraName
+                Description = 'Required to open the saved action window'
+                Authorized  = $null
+                IsDynamic   = $true
+                Source      = 'GetAllPermissions (prerequisite)'
+            }
         }
     }
 
     Log-Message (
-        "Converted $($builderActions.Count) BuilderAction " +
-        "permission definition(s) into runtime tool mappings."
+        "Converted $($savedActions.Count) Builder Action(s) into " +
+        "$($builderActions.Count) runtime mapping(s), including " +
+        "$($availableInfrastructure.Count) prerequisite permission(s) " +
+        "per action."
     ) "INFO"
 
     return @(
@@ -5784,9 +6355,6 @@ function ConvertTo-RmsBuilderActionMap {
     )
 }
 function Update-RmsEffectiveToolMap {
-    # Build complete friendly tools, not isolated permission rows.
-    # If GetAllPermissions loaded successfully, every permission behind a
-    # friendly tool must exist in that catalog or the whole tool is hidden.
     $combinedMap = @()
     $seenPermissions = @{}
     $includedMappingCount = 0
@@ -5816,74 +6384,92 @@ function Update-RmsEffectiveToolMap {
 
         $category = To-TrimmedString $entries[0].Cat
         $toolName = To-TrimmedString $entries[0].Name
-        $toolAvailable = $true
-        $missingPermissions = @()
 
-        if ($Global:RmsPermissionCatalogLoaded) {
-            foreach ($entry in $entries) {
-                if (-not (Test-RmsPermissionAvailable `
-                    -PluginName $entry.Plugin `
-                    -PermissionName $entry.Action)) {
-
-                    $toolAvailable = $false
-                    $missingPermissions += (
-                        "{0}/{1}" -f $entry.Plugin, $entry.Action
-                    )
-                }
-            }
-        }
-
+        # Tool-level version requirement - used ONLY as a fallback for
+        # tools with no permission-level requirement of their own. This
+        # preserves existing behavior for Remote File Explorer / Remote
+        # Registry, where the whole capability tier is genuinely new.
         $versionRequirement =
             Get-RmsToolVersionRequirement `
                 -Category $category `
                 -ToolName $toolName
 
-        if (
-            $toolAvailable -and
-            $versionRequirement -and
-            -not (
-                Test-RmsToolVersionSupported `
-                    -Category $category `
-                    -ToolName $toolName
-            )
-        ) {
-            $toolAvailable = $false
-
-            $missingPermissions += (
-                "Requires " +
-                "$($versionRequirement.SourceType) " +
-                "$($versionRequirement.MinimumVersion); " +
-                "connected Recast Management Server is " +
-                "$Global:RmsServerVersionText"
-            )
-
-            Log-Message (
-                "Excluded '$category / $toolName'. " +
-                "$($versionRequirement.SourceType): " +
-                "$($versionRequirement.MinimumVersion). " +
-                "Detected RMS version: " +
-                "$Global:RmsServerVersionText. " +
-                "Source: $($versionRequirement.Source)."
-            ) "INFO"
-        }
-        if (-not $toolAvailable) {
-            $excludedToolCount++
-            $excludedMappingCount += $entries.Count
-
-            Log-Message (
-                "Excluded tool '$category / $toolName' because " +
-                "$($missingPermissions.Count) required permission(s) " +
-                "were absent from GetAllPermissions."
-            ) "INFO"
-
-            continue
-        }
-
-        $includedToolCount++
+        $toolIncludedAnyPermission = $false
 
         foreach ($entry in $entries) {
             $plugin = To-TrimmedString $entry.Plugin
             $action = To-TrimmedString $entry.Action
+
+            # ---------- Per-permission availability check ----------
+            # A permission absent from THIS server's own GetAllPermissions
+            # excludes only that permission, not the whole tool. This is
+            # the check that was actually firing for RefreshSettings on
+            # builds older than 5.12.2607.2401 - the permission simply
+            # does not exist there yet, so this fires BEFORE the version
+            # catalog check ever runs.
+            if (
+                $Global:RmsPermissionCatalogLoaded -and
+                -not (
+                    Test-RmsPermissionAvailable `
+                        -PluginName $plugin `
+                        -PermissionName $action
+                )
+            ) {
+                $excludedMappingCount++
+                Log-Message (
+                    "Excluded permission '$plugin/$action' from " +
+                    "'$category / $toolName' because it was absent " +
+                    "from GetAllPermissions on this server."
+                ) "INFO"
+                continue
+            }
+
+            # ---------- Per-permission version check ----------
+            $permissionVersionRequirement =
+                Get-RmsPermissionVersionRequirement `
+                    -Plugin $plugin `
+                    -Action $action
+
+            if (
+                $permissionVersionRequirement -and
+                -not (
+                    Test-RmsPermissionVersionSupported `
+                        -Plugin $plugin `
+                        -Action $action
+                )
+            ) {
+                $excludedMappingCount++
+                Log-Message (
+                    "Excluded permission '$plugin/$action' from " +
+                    "'$category / $toolName'. " +
+                    "$($permissionVersionRequirement.SourceType): " +
+                    "$($permissionVersionRequirement.MinimumVersion). " +
+                    "Detected RMS version: $Global:RmsServerVersionText."
+                ) "INFO"
+                continue
+            }
+
+            # ---------- Tool-level version check (fallback only) ----------
+            if (
+                $versionRequirement -and
+                -not $permissionVersionRequirement -and
+                -not (
+                    Test-RmsToolVersionSupported `
+                        -Category $category `
+                        -ToolName $toolName
+                )
+            ) {
+                $excludedMappingCount++
+                Log-Message (
+                    "Excluded permission '$plugin/$action' from " +
+                    "'$category / $toolName'. " +
+                    "$($versionRequirement.SourceType): " +
+                    "$($versionRequirement.MinimumVersion). " +
+                    "Detected RMS version: $Global:RmsServerVersionText."
+                ) "INFO"
+                continue
+            }
+
             $permissionKey = (
                 "{0}|{1}|{2}|{3}" -f
                 $category, $toolName, $plugin, $action
@@ -5895,6 +6481,7 @@ function Update-RmsEffectiveToolMap {
 
             $seenPermissions[$permissionKey] = $true
             $includedMappingCount++
+            $toolIncludedAnyPermission = $true
 
             $combinedMap += [pscustomobject]@{
                 Cat         = $category
@@ -5905,8 +6492,23 @@ function Update-RmsEffectiveToolMap {
                 Authorized  = $entry.Authorized
                 IsDynamic   = [bool]$entry.IsDynamic
                 Source      = To-TrimmedString $entry.Source
-                MinimumRmsVersion = if ($minimumVersion) { $minimumVersion.ToString() } else { $null }
+                MinimumRmsVersion = if ($permissionVersionRequirement) {
+                    $permissionVersionRequirement.MinimumVersion.ToString()
+                } elseif ($versionRequirement) {
+                    $versionRequirement.MinimumVersion.ToString()
+                } else { $null }
             }
+        }
+
+        if ($toolIncludedAnyPermission) {
+            $includedToolCount++
+        }
+        else {
+            $excludedToolCount++
+            Log-Message (
+                "Tool '$category / $toolName' has zero available " +
+                "permission(s) on this server and will not appear."
+            ) "INFO"
         }
     }
 
@@ -6560,6 +7162,78 @@ function Update-CurrentRmsDisplay {
     $Global:CurrentRmsTextCtrl.ToolTip = $displayUrl
 }
 
+
+function Toggle-SwitchRmsVisibility {
+
+    # Testing-only reveal. Does NOT persist across restarts - the script
+
+    # always starts with $script:EnableRmsSwitch = $false regardless of
+
+    # whether this was toggled on in a previous session.
+
+    if (-not $Global:SwitchRmsButtonCtrl) {
+
+        return
+
+    }
+
+
+
+    $isCurrentlyVisible = (
+
+        $Global:SwitchRmsButtonCtrl.Visibility -eq
+
+        [System.Windows.Visibility]::Visible
+
+    )
+
+
+
+    if ($isCurrentlyVisible) {
+
+        $Global:SwitchRmsButtonCtrl.Visibility =
+
+            [System.Windows.Visibility]::Collapsed
+
+        $Global:SwitchRmsButtonCtrl.IsEnabled = $false
+
+        $script:EnableRmsSwitch = $false
+
+
+
+        Log-Message "Switch RMS hidden via keyboard shortcut." "INFO"
+
+        Set-Status "Switch RMS hidden."
+
+    }
+
+    else {
+
+        $Global:SwitchRmsButtonCtrl.Visibility =
+
+            [System.Windows.Visibility]::Visible
+
+        $Global:SwitchRmsButtonCtrl.IsEnabled = $true
+
+        $script:EnableRmsSwitch = $true
+
+
+
+        Log-Message (
+
+            "Switch RMS revealed via keyboard shortcut (F9). " +
+
+            "This control is intended for multi-environment testing."
+
+        ) "WARN"
+
+        Set-Status "Switch RMS revealed."
+
+    }
+
+}
+
+
 function Reset-RmsEnvironmentState {
     $Global:RmsAvailablePermissionSet = @{}
     $Global:RmsPermissionCatalogLoaded = $false
@@ -6594,8 +7268,14 @@ function Test-RmsConnection {
 }
 
 # ---------------------------- EVENT HANDLERS ----------------------------
-if ($script:EnableRmsSwitch -and $Global:MainControls.SwitchRms) {
-    $Global:MainControls.SwitchRms.Add_Click({
+
+# Always register the Switch RMS handler. Visibility and IsEnabled control
+
+# whether the button can be seen or clicked; the handler itself must exist
+
+# so the Ctrl+Shift+R reveal works even if the button was hidden at startup.
+
+$Global:MainControls.SwitchRms.Add_Click({
     $previousRms = $script:RMS
     try {
         $requestedUrl = Show-InputDialog `
@@ -6721,7 +7401,6 @@ if ($script:EnableRmsSwitch -and $Global:MainControls.SwitchRms) {
         Refresh-UI
     }
     })
-}
 
 $Global:MainControls.ApplyAuth.Add_Click({
     try {
@@ -7732,6 +8411,17 @@ $Global:MainControls.Delete.Add_Click({
 
 $Global:MainControls.Exit.Add_Click({ Dispose-Logger; $global:window.Close() })
 $global:window.Add_Closing({ Dispose-Logger })
+
+$global:window.Add_KeyDown({
+    param($sender, $e)
+
+    if ($e.Key -eq [System.Windows.Input.Key]::F9) {
+        Toggle-SwitchRmsVisibility
+        $e.Handled = $true
+    }
+})
+
+
 
 $global:window.Add_SourceInitialized({
     try {
